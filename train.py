@@ -67,8 +67,8 @@ for epoch in range(10000):
     loss = loss_fn(out, y)
     loss.backward()
     opt.step()
-    if epoch%1000==0:
-        print(loss.item())
+#    if epoch%1000==0:
+#        print(loss.item())
 
 #xval, yval = get_data()
 #plt.plot(xval.numpy(), model(xval).detach().numpy(), ".")
