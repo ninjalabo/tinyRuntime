@@ -102,7 +102,7 @@ if save_model:
         serialize_fp32(f, w)
     
     for b in bias:
-        serialize_fp32(f, w)
+        serialize_fp32(f, b)
 
     f.close()
 
