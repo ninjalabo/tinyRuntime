@@ -25,7 +25,6 @@ typedef struct {
 typedef struct {
     float *x; // buffer (dim,)
     float *x2; // buffer (dim,)
-    float output; // output
 } Runstate;
 
 typedef struct {
@@ -128,12 +127,13 @@ float forward_one(Model* m, float input) {
     float *x = s->x;
     float *x2 = s->x2;
     int dim = m->dim;
+    float output;
 
     matmul_relu(x, &input, w->wi, w->bi, 1, dim);
     matmul_relu(x2, x, w->wh, w->bh, dim, dim);
-    matmul(&s->output, x2, w->wo, w->bo, dim, 1);
+    matmul(&output, x2, w->wo, w->bo, dim, 1);
 
-    return s->output;
+    return output;
 }
 
 float* forward_all(Model* m, float* inputs, int size) {
@@ -191,8 +191,8 @@ int main(int argc, char** argv) {
     //write_weights(&model, "weightsc.txt");
     //write_output(outputs, "outputc.txt", 4);
     
-    //for (int i = 0; i<4; i++)
-    //    printf("%f\t", outputs[i]);
+    for (int i = 0; i<4; i++)
+        printf("%f\t", outputs[i]);
 
     // memory and file handles cleanup
     free(outputs);
