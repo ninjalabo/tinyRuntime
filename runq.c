@@ -102,11 +102,6 @@ void memory_map_weights(Weights* w, int dim, void* ptr) {
     w->wo = init_quantized_tensors(&ptr, 1, dim);
     w->bi = init_quantized_tensors(&ptr, 1, dim);
     w->bh = init_quantized_tensors(&ptr, 1, dim);
-    // the bias of the output layer cannot be initialized by init_quantized_tensor because its length is 1
-    // QuantizedTensor *res = malloc(n * sizeof(QuantizedTensor));
-    // w->bo->q = (int8_t*) ptr;
-    // ptr += (int8_t) 1;
-    // w->bo->s = (float*) ptr;
     w->bo = init_quantized_tensors(&ptr, 1, 1);
 }
 
@@ -138,6 +133,13 @@ void build_model(Model* m, char* checkpoint_path) {
 }
 
 void free_model(Model* m) {
+    // free QuantizedTensors
+    free(m->weights.wi);
+    free(m->weights.wh);
+    free(m->weights.wo);
+    free(m->weights.bi);
+    free(m->weights.bh);
+    free(m->weights.bo);
     // close the memory mapping
     if (m->data != MAP_FAILED) { munmap(m->data, m->file_size); }
     if (m->fd != -1) { close(m->fd); }
@@ -162,7 +164,7 @@ void matmul(float* xout, QuantizedTensor* x, QuantizedTensor* w, QuantizedTensor
             val += ((float) ival) * w->s[(in + j) / GS] * x->s[j / GS];
             ival = 0;
         }
-        xout[i] = val + (float) b->q[i] * b->s[0];
+        xout[i] = val + ((float) b->q[i]) * b->s[i / GS];
     }
 }
 
@@ -183,7 +185,7 @@ void matmul_relu(float* xout, QuantizedTensor* x, QuantizedTensor* w, QuantizedT
             val += ((float) ival) * w->s[(in + j) / GS] * x->s[j / GS];
             ival = 0;
         }
-        xout[i] = fmax(0.0f, val + (float) b->q[i] * b->s[0]);
+        xout[i] = fmax(0.0f, val + ((float) b->q[i]) * b->s[i / GS]);
     }
 }
 
@@ -193,8 +195,11 @@ float forward_one(Model* m, float input) {
     Runstate* s = &m->state;
     int dim = m->dim;
     float output;
+    
+    // calculate activation of the first layer (1,) @ (GS,) + (GS,) -> (GS,)
     for (int i = 0; i<dim; i++)
-        s->x[i] = fmax(((float) w->wi->q[i]) * w->wi->s[0] * input + ((float) w->bi->q[i]) * w->bi->s[0], 0.0f);
+        s->x[i] = fmax(((float) w->wi->q[i]) * w->wi->s[i / GS] * input + ((float) w->bi->q[i]) * w->bi->s[i / GS], 0.0f);
+    // quantize float type activations and matmul them with model parameters  
     quantize(&s->xq, s->x, dim);
     matmul_relu(s->x, &s->xq, w->wh, w->bh, dim, dim);
     quantize(&s->xq, s->x, dim);
@@ -205,7 +210,7 @@ float forward_one(Model* m, float input) {
 
 float* forward_all(Model* m, float* inputs, int size) {
     // forward step for all inputs
-    float* outputs = calloc(size, sizeof(float));
+    float* outputs = malloc(size*sizeof(float));
     for (int i = 0; i<size; i++) {
         outputs[i] = forward_one(m, inputs[i]);
     }
@@ -251,13 +256,17 @@ int main(int argc, char** argv) {
     // read a model path
     if (argc == 2) { checkpoint_path = argv[1]; } else { error_usage(); }
 
-    // build the model via the model .bin file 
+    // build the model via model.bin file 
     Model model;
     build_model(&model, checkpoint_path);
 
     // run
     float inputs[4] = {0.001, 1.57, 3.14, 6.28};
+    clock_t start = clock();
     float* outputs = forward_all(&model, inputs, 4);
+    clock_t end = clock();
+    float time_used = ((float) (end - start)) / CLOCKS_PER_SEC;
+    printf("Time used: %f\n", time_used);
 
     // check the weights and outputs are valid
     //write_params(&model, "paramsq8.txt");

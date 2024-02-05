@@ -138,7 +138,7 @@ float forward_one(Model* m, float input) {
 
 float* forward_all(Model* m, float* inputs, int size) {
     // forward step for all inputs
-    float* outputs = calloc(size, sizeof(float));
+    float* outputs = malloc(size*sizeof(float));
     for (int i = 0; i<size; i++) {
         outputs[i] = forward_one(m, inputs[i]);
     }
@@ -179,14 +179,17 @@ int main(int argc, char** argv) {
     // read a model path
     if (argc == 2) { checkpoint_path = argv[1]; } else { error_usage(); }
 
-    // build the model via the model .bin file 
+    // build the model via model.bin file 
     Model model;
     build_model(&model, checkpoint_path);
 
     // run
     float inputs[4] = {0.001, 1.57, 3.14, 6.28};
+    clock_t start = clock();
     float* outputs = forward_all(&model, inputs, 4);
-
+    clock_t end = clock();
+    float time_used = ((float) (end - start)) / CLOCKS_PER_SEC;
+    printf("Time used: %f\n", time_used);
     // check the weights and outputs are valid
     //write_weights(&model, "weightsc.txt");
     //write_output(outputs, "outputc.txt", 4);
