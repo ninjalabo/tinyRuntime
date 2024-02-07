@@ -185,11 +185,8 @@ int main(int argc, char** argv) {
 
     // run
     float inputs[4] = {0.001, 1.57, 3.14, 6.28};
-    clock_t start = clock();
     float* outputs = forward_all(&model, inputs, 4);
-    clock_t end = clock();
-    float time_used = ((float) (end - start)) / CLOCKS_PER_SEC;
-    printf("Time used: %f\n", time_used);
+
     // check the weights and outputs are valid
     //write_weights(&model, "weightsc.txt");
     //write_output(outputs, "outputc.txt", 4);
