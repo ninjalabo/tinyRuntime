@@ -1,0 +1,9 @@
+project:
+  output-dir: _docs
+
+website:
+  title: "tinyRuntime-ffn"
+  site-url: "https://njlabo.github.io/tinyRuntime-ffn"
+  description: "tinyRuntime for Forward Fully Connected layers (FFC)"
+  repo-branch: main
+  repo-url: "https://github.com/njlabo/tinyRuntime-ffn"
