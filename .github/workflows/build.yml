@@ -1,0 +1,77 @@
+
+name: Testing workflow
+
+on:
+  push:
+    paths: ['Makefile', '.github/workflows/**', '*.c', test_all.py]
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths: ['Makefile', '.github/workflows/**', '*.c', test_all.py]
+  workflow_dispatch:
+
+jobs:
+  ubuntu-focal-make:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Clone
+        id: checkout
+        uses: actions/checkout@v4
+      
+      - name: Dependencies
+        id: depends
+        run: |
+          sudo apt-get update
+          sudo apt-get install build-essential -y
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Pip setup
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+    
+      - name: Build
+        id: make_build
+        run: |
+          make compile
+
+      - name: Run Tests
+        run: |
+          pytest
+
+  macOS-latest-make:
+    runs-on: macos-latest
+
+    steps:
+      - name: Clone
+        id: checkout
+        uses: actions/checkout@v4
+
+      - name: Dependencies
+        id: depends
+        continue-on-error: true
+        run: |
+          brew update
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Pip setup
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          
+      - name: Build
+        id: make_build
+        run: |
+          make compile CC=clang
+
+      - name: Run Tests
+        run: |
+          pytest
