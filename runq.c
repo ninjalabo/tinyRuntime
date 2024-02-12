@@ -6,12 +6,13 @@
 #include <math.h>
 #include <string.h>
 #include <fcntl.h>
-#if defined _WIN32
-    #include "win.h"
-#else
-    #include <unistd.h>
-    #include <sys/mman.h>
-#endif
+#include <unistd.h>
+#include <sys/mman.h>
+#include <stdint.h>
+#include <dirent.h>
+#include <sys/stat.h>
+
+#define IMAGE_SZ (28*28)
 
 int GS = 0; // group size global for quantization of the weights
 
@@ -21,21 +22,26 @@ typedef struct {
 } QuantizedTensor;
 
 typedef struct {
-    QuantizedTensor* wi; // input layer weights (dim,)
-    QuantizedTensor* wh; // hidden layer weights (dim, dim)
-    QuantizedTensor* wo; // output layer weights (dim,)
+    int dim; // model dimension
+    int nclass; // the number of classes
+} Config;
+
+typedef struct {
+    QuantizedTensor* wi; // input layer weights (dim, IMAGE_SZ)
+    QuantizedTensor* wh; // hidden layer weights (dim/2, dim)
+    QuantizedTensor* wo; // output layer weights (nclass, dim/2)
     QuantizedTensor* bi; // input layer bias (dim,)
-    QuantizedTensor* bh; // hidden layer bias (dim,)
-    QuantizedTensor* bo; // output layer bias (1,)
+    QuantizedTensor* bh; // hidden layer bias (dim/2,)
+    QuantizedTensor* bo; // output layer bias (nclass,)
 } Weights;
 
 typedef struct {
-    float *x; // buffer (dim,)
-    QuantizedTensor xq; // quantized x (dim,)
+    float* x; // buffer to store the output of a layer (IMAGE_SZ,)
+    QuantizedTensor xq; // buffer for quantized arrays
 } Runstate;
 
 typedef struct {
-    int dim;  // model dimension
+    Config config; // the hyperparameters of the architecture (the blueprint)
     Weights weights; // the weights of the model
     Runstate state; // the current state in the forward pass
     int fd; // file descriptor for memory mapping
@@ -43,10 +49,11 @@ typedef struct {
     size_t file_size; // size of the checkpoint file in bytes
 } Model;
 
-void malloc_run_state(Runstate* s, int dim) {
-    s->x = calloc(dim, sizeof(float));
-    // FIX .s calloc(dim/GS, sizeof(float))
-    s->xq = (QuantizedTensor) { .q = calloc(dim, sizeof(int8_t)), .s = calloc(dim, sizeof(float)) };}
+void malloc_run_state(Runstate* s) {
+    int inp_dim = IMAGE_SZ;
+    s->x = calloc(inp_dim, sizeof(float));
+    s->xq = (QuantizedTensor) { .q = calloc(inp_dim, sizeof(int8_t)), .s = calloc(inp_dim/GS + 1, sizeof(float)) };
+}
 
 void free_run_state(Runstate* s) {
     free(s->x);
@@ -83,7 +90,7 @@ void quantize(QuantizedTensor *qx, float* x, int n) {
 QuantizedTensor *init_quantized_tensors(void **ptr, int n, int size_each) {
     void *p = *ptr;
     QuantizedTensor *res = malloc(n * sizeof(QuantizedTensor));
-    for(int i=0; i<n; i++) {
+    for(int i=0; i < n; i++) {
         /* map quantized int8 values*/
         res[i].q = (int8_t*)p;
         p = (int8_t*)p + size_each;
@@ -95,21 +102,23 @@ QuantizedTensor *init_quantized_tensors(void **ptr, int n, int size_each) {
     return res;
 }
 
-void memory_map_weights(Weights* w, int dim, void* ptr) {
+void memory_map_weights(Weights* w, Config* c, void* ptr) {
     // maps memory for the weights and bias of each layer
-    w->wi = init_quantized_tensors(&ptr, 1, dim);
-    w->wh = init_quantized_tensors(&ptr, 1, dim*dim);;
-    w->wo = init_quantized_tensors(&ptr, 1, dim);
+    int dim = c->dim;
+    int nclass = c->nclass;
+    w->wi = init_quantized_tensors(&ptr, 1, IMAGE_SZ*dim);
+    w->wh = init_quantized_tensors(&ptr, 1, dim/2*dim);;
+    w->wo = init_quantized_tensors(&ptr, 1, dim/2*nclass);
     w->bi = init_quantized_tensors(&ptr, 1, dim);
-    w->bh = init_quantized_tensors(&ptr, 1, dim);
-    w->bo = init_quantized_tensors(&ptr, 1, 1);
+    w->bh = init_quantized_tensors(&ptr, 1, dim/2);
+    w->bo = init_quantized_tensors(&ptr, 1, nclass);
 }
 
-void read_checkpoint(char* path, int* dim, Weights* weigths, int* fd, float** data, size_t* file_size) {
+void read_checkpoint(char* path, Config* config, Weights* weigths, int* fd, float** data, size_t* file_size) {
     FILE *file = fopen(path, "rb");
     if (!file) { fprintf(stderr, "Couldn't open file %s\n", path); exit(EXIT_FAILURE); }
     // read model config
-    if (fread(dim, sizeof(int), 1, file) != 1) { exit(EXIT_FAILURE); } 
+    if (fread(config, sizeof(Config), 1, file) != 1) { exit(EXIT_FAILURE); }
     int group_size; // the group size used in quantization
     if (fread(&group_size, sizeof(int), 1, file) != 1) { exit(EXIT_FAILURE); }
     GS = group_size; // set as global, as it will be used in many places
@@ -122,14 +131,15 @@ void read_checkpoint(char* path, int* dim, Weights* weigths, int* fd, float** da
     if (*fd == -1) { fprintf(stderr, "open failed!\n"); exit(EXIT_FAILURE); }
     *data = mmap(NULL, *file_size, PROT_READ, MAP_PRIVATE, *fd, 0);
     if (*data == MAP_FAILED) { fprintf(stderr, "mmap failed!\n"); exit(EXIT_FAILURE); }
-    void* weights_ptr = *data + 256/sizeof(float);
-    memory_map_weights(weigths, *dim, weights_ptr);
+    void* weights_ptr = *data + (sizeof(Config)+sizeof(int))/sizeof(float); // position the pointer to the start of the parameter data
+    memory_map_weights(weigths, config, weights_ptr);
 }
+
 void build_model(Model* m, char* checkpoint_path) {
     // read in the Config and the Weights from the checkpoint
-    read_checkpoint(checkpoint_path, &m->dim, &m->weights, &m->fd, &m->data, &m->file_size);
+    read_checkpoint(checkpoint_path, &m->config, &m->weights, &m->fd, &m->data, &m->file_size);
     // allocate the RunState buffers
-    malloc_run_state(&m->state, m->dim);
+    malloc_run_state(&m->state);
 }
 
 void free_model(Model* m) {
@@ -147,8 +157,8 @@ void free_model(Model* m) {
     free_run_state(&m->state);
 }
 
-void matmul(float* xout, QuantizedTensor* x, QuantizedTensor* w, QuantizedTensor* b, int n, int d) {
-    // W (d,n) @ x (n,) + b(d,) -> xout (d,)
+void linear(float* xout, QuantizedTensor* x, QuantizedTensor* w, QuantizedTensor* b, int n, int d) {
+    // linear layer: w(d,n) @ x (n,) + b(d,) -> xout (d,)
     // by far the most amount of time is spent inside this little function
     int i;
     #pragma omp parallel for private(i)
@@ -168,8 +178,8 @@ void matmul(float* xout, QuantizedTensor* x, QuantizedTensor* w, QuantizedTensor
     }
 }
 
-void matmul_relu(float* xout, QuantizedTensor* x, QuantizedTensor* w, QuantizedTensor* b, int n, int d) {
-    // W (d,n) @ x (n,) + b(d,) -> xout (d,)
+void linear_with_relu(float* xout, QuantizedTensor* x, QuantizedTensor* w, QuantizedTensor* b, int n, int d) {
+    // linear layer with ReLU activation: w(d,n) @ x (n,) + b(d,) -> xout (d,)
     // by far the most amount of time is spent inside this little function
     int i;
     #pragma omp parallel for private(i)
@@ -189,90 +199,94 @@ void matmul_relu(float* xout, QuantizedTensor* x, QuantizedTensor* w, QuantizedT
     }
 }
 
-float forward_one(Model* m, float input) {
-    // forward step for one input
-    Weights* w = &m->weights;
-    Runstate* s = &m->state;
-    int dim = m->dim;
-    float output;
-    
-    // calculate activation of the first layer (1,) @ (GS,) + (GS,) -> (GS,)
-    for (int i = 0; i<dim; i++)
-        s->x[i] = fmax(((float) w->wi->q[i]) * w->wi->s[i / GS] * input + ((float) w->bi->q[i]) * w->bi->s[i / GS], 0.0f);
-    // quantize float type activations and matmul them with model parameters  
-    quantize(&s->xq, s->x, dim);
-    matmul_relu(s->x, &s->xq, w->wh, w->bh, dim, dim);
-    quantize(&s->xq, s->x, dim);
-    matmul(&output, &s->xq, w->wo, w->bo, dim, 1);
-
-    return output;
-}
-
-float* forward_all(Model* m, float* inputs, int size) {
-    // forward step for all inputs
-    float* outputs = malloc(size*sizeof(float));
-    for (int i = 0; i<size; i++) {
-        outputs[i] = forward_one(m, inputs[i]);
+void normalize(float* xout, uint8_t* image) {
+    // normalize values [0, 255] -> [-1, 1]
+    for (int i = 0; i < IMAGE_SZ; i++) {
+        xout[i] = ((float) image[i] / 255 - 0.5) / 0.5;
     }
-    return outputs;
 }
 
-void write_params(Model* m, char* filepath) {
-    // writes a file to check if the model parameters are read correctly
-    int dim = m->dim;
-    FILE* f = fopen(filepath, "w");
-    for (int i = 0; i<dim; i++) { fprintf(f, "%i\n", m->weights.wi->q[i]); }
-    for (int i = 0; i<dim*dim; i++) { fprintf(f, "%i\n", m->weights.wh->q[i]); }
-    for (int i = 0; i<dim; i++) { fprintf(f, "%i\n", m->weights.wo->q[i]); }
-    for (int i = 0; i<dim; i++) { fprintf(f, "%i\n", m->weights.bi->q[i]); }
-    for (int i = 0; i<dim; i++) { fprintf(f, "%i\n", m->weights.bh->q[i]); }
-    fprintf(f, "%i\n\n", m->weights.bo->q[0]);
-    fprintf(f, "%f\n", m->weights.wi->s[0]);
-    for (int i = 0; i<dim*dim/GS; i++) { fprintf(f, "%f\n", m->weights.wh->s[i]); }
-    fprintf(f, "%f\n", m->weights.wo->s[0]);
-    fprintf(f, "%f\n", m->weights.bi->s[0]);
-    fprintf(f, "%f\n", m->weights.bh->s[0]);
-    fprintf(f, "%f\n", m->weights.bo->s[0]);
-    fclose(f); 
+void softmax(float* x, int size) {
+    // find max value (for numerical stability)
+    float max_val = x[0];
+    for (int i = 1; i < size; i++) {
+        if (x[i] > max_val) {
+            max_val = x[i];
+        }
+    }
+    // exp and sum
+    float sum = 0.0f;
+    for (int i = 0; i < size; i++) {
+        x[i] = expf(x[i] - max_val);
+        sum += x[i];
+    }
+    // normalize
+    for (int i = 0; i < size; i++) {
+        x[i] /= sum;
+    }
 }
 
-void write_output(float* outputs, char* filepath, int size) {
-    // writes a file to check if the model parameters are read correctly
-    FILE* f = fopen(filepath, "w");
-    for (int i = 0; i<size; i++)
-        fprintf(f, "%f\n", outputs[i]);
-    fclose(f); 
+void read_mnist_image(char* path, uint8_t *image) {
+    FILE* file = fopen(path, "rb");
+    if (!file) { perror("Error opening file"); exit(EXIT_FAILURE); }
+    fread(image, sizeof(uint8_t), IMAGE_SZ, file);
+    fclose(file);
+}
+
+// sanity check function for writing tensors, e.g., it can be used to evaluate values after a specific layer.
+void write_tensor(float* x, int size) {
+    FILE* f = fopen("actc.txt", "w");
+    for (int i = 0; i < size; i++)
+        fprintf(f, "%f\n", x[i]);
+    fclose(f);
+}
+
+void forward(Model* m, uint8_t* image) {
+    Weights* w = &m->weights;
+    int dim = m->config.dim;
+    int nclass = m->config.nclass;
+    Runstate* s = &m->state;
+    float *x = s->x;
+    QuantizedTensor xq = s->xq;
+
+    normalize(x, image);
+    quantize(&xq, x, IMAGE_SZ);
+    linear_with_relu(x, &xq, w->wi, w->bi, IMAGE_SZ, dim);
+    quantize(&xq, x, dim);
+    linear_with_relu(x, &xq, w->wh, w->bh, dim, dim/2);
+    quantize(&xq, x, dim/2);
+    linear(x, &xq, w->wo, w->bo, dim/2, nclass);
+    softmax(x, nclass);
 }
 
 void error_usage() {
-    fprintf(stderr, "Usage:   run <checkpoint>\n");
+    fprintf(stderr, "Usage:   run <model> <image>\n");
+    fprintf(stderr, "Example: run modelq8.bin image1 image2 ... imageN\n");
     exit(EXIT_FAILURE);
 }
 
 int main(int argc, char** argv) {
-    // default parameters
-    char *checkpoint_path = NULL;  // e.g. out/model.bin
 
-    // read a model path
-    if (argc == 2) { checkpoint_path = argv[1]; } else { error_usage(); }
+    char* model_path = NULL;
+    char* image_path = NULL;
 
-    // build the model via model.bin file 
+    // read images and model path, then outputs the probability distribution for the given images.
+    if (argc < 3) { error_usage(); }
+    model_path = argv[1]; 
     Model model;
-    build_model(&model, checkpoint_path);
+    build_model(&model, model_path);
+    uint8_t* image = malloc(IMAGE_SZ);
+    for (int i = 2; i < argc; i++) {
+        image_path = argv[i];
+        read_mnist_image(image_path, image);
+        forward(&model, image); // output (nclass,) is stored in model.state.x2
+        for (int j = 0; j < model.config.nclass; j++) {
+            printf("%f\t", model.state.x[j]);
+        }
+        printf("\n");
+    }
 
-    // run
-    float inputs[4] = {0.001, 1.57, 3.14, 6.28};
-    float* outputs = forward_all(&model, inputs, 4);
-
-    // check the weights and outputs are valid
-    //write_params(&model, "paramsq8.txt");
-    //write_output(outputs, "outputq8.txt", 4);
-    
-    for (int i = 0; i<4; i++)
-        printf("%f\t", outputs[i]);
-
-    // memory and file handles cleanup
-    free(outputs);
+    free(image);
     free_model(&model);
     return 0;
 }
