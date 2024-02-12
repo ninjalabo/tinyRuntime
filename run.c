@@ -6,29 +6,35 @@
 #include <math.h>
 #include <string.h>
 #include <fcntl.h>
-#if defined _WIN32
-    #include "win.h"
-#else
-    #include <unistd.h>
-    #include <sys/mman.h>
-#endif
+#include <unistd.h>
+#include <sys/mman.h>
+#include <stdint.h>
+#include <dirent.h>
+#include <sys/stat.h>
+
+#define IMAGE_SZ (28*28)
 
 typedef struct {
-    float* wi; // input layer weights (dim,)
-    float* wh; // hidden layer weights (dim, dim)
-    float* wo; // output layer weights (dim,)
+    int dim; // model dimension
+    int nclass; // the number of classes
+} Config;
+
+typedef struct {
+    float* wi; // input layer weights (dim, IMAGE_SZ)
+    float* wh; // hidden layer weights (dim/2, dim)
+    float* wo; // output layer weights (nclass, dim/2)
     float* bi; // input layer bias (dim,)
-    float* bh; // hidden layer bias (dim,)
-    float* bo; // output layer bias (1,)
+    float* bh; // hidden layer bias (dim/2,)
+    float* bo; // output layer bias (nclass,)
 } Weights;
 
 typedef struct {
-    float *x; // buffer (dim,)
-    float *x2; // buffer (dim,)
+    float* x; // buffer to store the output of a layer (IMAGE_SZ,)
+    float* x2; // buffer to store the output of a layer (dim,)
 } Runstate;
 
 typedef struct {
-    int dim;  // model dimension
+    Config config; // the hyperparameters of the architecture (the blueprint)
     Weights weights; // the weights of the model
     Runstate state; // the current state in the forward pass
     int fd; // file descriptor for memory mapping
@@ -37,7 +43,7 @@ typedef struct {
 } Model;
 
 void malloc_run_state(Runstate* s, int dim) {
-    s->x = calloc(dim, sizeof(float));
+    s->x = calloc(IMAGE_SZ, sizeof(float));
     s->x2 = calloc(dim, sizeof(float));
 }
 
@@ -46,26 +52,28 @@ void free_run_state(Runstate* s) {
     free(s->x2);
 }
 
-void memory_map_weights(Weights* w, int dim, float* ptr) {
+void memory_map_weights(Weights* w, Config* c, float* ptr) {
     // maps memory for the weights and bias of each layer
+    int dim = c->dim;
+    int nclass = c->nclass;
     w->wi = ptr;
-    ptr += dim;
+    ptr += IMAGE_SZ * dim;
     w->wh = ptr;
-    ptr += dim * dim;
+    ptr += dim * dim/2;
     w->wo = ptr;
-    ptr += dim;
+    ptr +=  nclass * dim/2;
     w->bi = ptr;
     ptr += dim;
     w->bh = ptr;
-    ptr += dim;
+    ptr += dim/2;
     w->bo = ptr;
 }
 
-void read_checkpoint(char* path, int* dim, Weights* weigths, int* fd, float** data, size_t* file_size) {
+void read_checkpoint(char* path, Config* config, Weights* weigths, int* fd, float** data, size_t* file_size) {
     FILE *file = fopen(path, "rb");
     if (!file) { fprintf(stderr, "Couldn't open file %s\n", path); exit(EXIT_FAILURE); }
     // read model config
-    if (fread(dim, sizeof(int), 1, file) != 1) { exit(EXIT_FAILURE); } 
+    if (fread(config, sizeof(Config), 1, file) != 1) { exit(EXIT_FAILURE); }
     // figure out the file size
     fseek(file, 0, SEEK_END); // move file pointer to end of file
     *file_size = ftell(file); // get the file size, in bytes
@@ -75,14 +83,15 @@ void read_checkpoint(char* path, int* dim, Weights* weigths, int* fd, float** da
     if (*fd == -1) { fprintf(stderr, "open failed!\n"); exit(EXIT_FAILURE); }
     *data = mmap(NULL, *file_size, PROT_READ, MAP_PRIVATE, *fd, 0);
     if (*data == MAP_FAILED) { fprintf(stderr, "mmap failed!\n"); exit(EXIT_FAILURE); }
-    float* weights_ptr = *data + 256/sizeof(float);
-    memory_map_weights(weigths, *dim, weights_ptr);
+    float* weights_ptr = *data + sizeof(Config)/sizeof(float); // position the pointer to the start of the parameter data
+    memory_map_weights(weigths, config, weights_ptr);
 }
+
 void build_model(Model* m, char* checkpoint_path) {
     // read in the Config and the Weights from the checkpoint
-    read_checkpoint(checkpoint_path, &m->dim, &m->weights, &m->fd, &m->data, &m->file_size);
+    read_checkpoint(checkpoint_path, &m->config, &m->weights, &m->fd, &m->data, &m->file_size);
     // allocate the RunState buffers
-    malloc_run_state(&m->state, m->dim);
+    malloc_run_state(&m->state, m->config.dim);
 }
 
 void free_model(Model* m) {
@@ -93,8 +102,8 @@ void free_model(Model* m) {
     free_run_state(&m->state);
 }
 
-void matmul(float* xout, float* x, float* w, float* b, int n, int d) {
-    // W (d,n) @ x (n,) + b(d,) -> xout (d,)
+void linear(float* xout, float* x, float* w, float* b, int n, int d) {
+    // linear layer: w(d,n) @ x (n,) + b(d,) -> xout (d,)
     // by far the most amount of time is spent inside this little function
     int i;
     #pragma omp parallel for private(i)
@@ -107,8 +116,8 @@ void matmul(float* xout, float* x, float* w, float* b, int n, int d) {
     }
 }
 
-void matmul_relu(float* xout, float* x, float* w, float* b, int n, int d) {
-    // matmul with ReLU
+void linear_with_relu(float* xout, float* x, float* w, float* b, int n, int d) {
+    // linear layer with ReLU activation: w(d,n) @ x (n,) + b(d,) -> xout (d,)
     int i;
     #pragma omp parallel for private(i)
     for (i = 0; i < d; i++) {
@@ -120,82 +129,91 @@ void matmul_relu(float* xout, float* x, float* w, float* b, int n, int d) {
     }
 }
 
-float forward_one(Model* m, float input) {
-    // forward step for one input
+void normalize(float* xout, uint8_t* image) {
+    // normalize values [0, 255] -> [-1, 1]
+    for (int i = 0; i < IMAGE_SZ; i++) {
+        xout[i] = ((float) image[i] / 255 - 0.5) / 0.5;
+    }
+}
+
+void softmax(float* x, int size) {
+    // find max value (for numerical stability)
+    float max_val = x[0];
+    for (int i = 1; i < size; i++) {
+        if (x[i] > max_val) {
+            max_val = x[i];
+        }
+    }
+    // exp and sum
+    float sum = 0.0f;
+    for (int i = 0; i < size; i++) {
+        x[i] = expf(x[i] - max_val);
+        sum += x[i];
+    }
+    // normalize
+    for (int i = 0; i < size; i++) {
+        x[i] /= sum;
+    }
+}
+
+void read_mnist_image(char* path, uint8_t *image) {
+    FILE* file = fopen(path, "rb");
+    if (!file) { perror("Error opening file"); exit(EXIT_FAILURE); }
+    fread(image, sizeof(uint8_t), IMAGE_SZ, file);
+    fclose(file);
+}
+
+// sanity check function for writing tensors, e.g., it can be used to evaluate values after a specific layer.
+void write_tensor(float* x, int size) {
+    FILE* f = fopen("actc.txt", "w");
+    for (int i = 0; i < size; i++)
+        fprintf(f, "%f\n", x[i]);
+    fclose(f);
+}
+
+void forward(Model* m, uint8_t* image) {
     Weights* w = &m->weights;
+    int dim = m->config.dim;
+    int nclass = m->config.nclass;
     Runstate* s = &m->state;
     float *x = s->x;
     float *x2 = s->x2;
-    int dim = m->dim;
-    float output;
 
-    matmul_relu(x, &input, w->wi, w->bi, 1, dim);
-    matmul_relu(x2, x, w->wh, w->bh, dim, dim);
-    matmul(&output, x2, w->wo, w->bo, dim, 1);
-
-    return output;
-}
-
-float* forward_all(Model* m, float* inputs, int size) {
-    // forward step for all inputs
-    float* outputs = malloc(size*sizeof(float));
-    for (int i = 0; i<size; i++) {
-        outputs[i] = forward_one(m, inputs[i]);
-    }
-    return outputs;
-}
-
-void write_weights(Model* m, char* filepath) {
-    // writes a file to check if the model parameters are read correctly
-    int dim = m->dim;
-    FILE* f = fopen(filepath, "w");
-    for (int i = 0; i<dim; i++) { fprintf(f, "%f\n", m->weights.wi[i]); }
-    for (int i = 0; i<dim*dim; i++) { fprintf(f, "%f\n", m->weights.wh[i]); }
-    for (int i = 0; i<dim; i++) { fprintf(f, "%f\n", m->weights.wo[i]); }
-    for (int i = 0; i<dim; i++) { fprintf(f, "%f\n", m->weights.bi[i]); }
-    for (int i = 0; i<dim; i++) { fprintf(f, "%f\n", m->weights.bh[i]); }
-    fprintf(f, "%f\n", m->weights.bo[0]);
-    fclose(f); 
-}
-
-void write_output(float* outputs, char* filepath, int size) {
-    // writes a file to check if the model parameters are read correctly
-    FILE* f = fopen(filepath, "w");
-    for (int i = 0; i<size; i++)
-        fprintf(f, "%f\n", outputs[i]);
-    fclose(f); 
+    normalize(x, image);
+    linear_with_relu(x2, x, w->wi, w->bi, IMAGE_SZ, dim);
+    linear_with_relu(x, x2, w->wh, w->bh, dim, dim/2);
+    linear(x2, x, w->wo, w->bo, dim/2, nclass);
+    softmax(x2, nclass);
 }
 
 void error_usage() {
-    fprintf(stderr, "Usage:   run <checkpoint>\n");
+    fprintf(stderr, "Usage:   run <model> <image>\n");
+    fprintf(stderr, "Example: run model.bin image1 image2 ... imageN\n");
     exit(EXIT_FAILURE);
 }
 
 int main(int argc, char** argv) {
 
-    // default parameters
-    char *checkpoint_path = NULL;  // e.g. out/model.bin
+    char* model_path = NULL;
+    char* image_path = NULL;
 
-    // read a model path
-    if (argc == 2) { checkpoint_path = argv[1]; } else { error_usage(); }
-
-    // build the model via model.bin file 
+    // read images and model path, then outputs the probability distribution for the given images.
+    if (argc < 3) { error_usage(); }
+    model_path = argv[1]; 
     Model model;
-    build_model(&model, checkpoint_path);
+    build_model(&model, model_path);
+    uint8_t* image = malloc(IMAGE_SZ);
+    for (int i = 2; i < argc; i++) {
+        image_path = argv[i];
+        read_mnist_image(image_path, image);
+        forward(&model, image); // output (nclass,) is stored in model.state.x2
+        for (int j = 0; j < model.config.nclass; j++) {
+            printf("%f\t", model.state.x2[j]);
+        }
+        printf("\n");
+    }
 
-    // run
-    float inputs[4] = {0.001, 1.57, 3.14, 6.28};
-    float* outputs = forward_all(&model, inputs, 4);
-
-    // check the weights and outputs are valid
-    //write_weights(&model, "weightsc.txt");
-    //write_output(outputs, "outputc.txt", 4);
-    
-    for (int i = 0; i<4; i++)
-        printf("%f\t", outputs[i]);
-
-    // memory and file handles cleanup
-    free(outputs);
+    free(image);
     free_model(&model);
     return 0;
 }
