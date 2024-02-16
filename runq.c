@@ -9,6 +9,8 @@
 #include <unistd.h>
 #include <sys/mman.h>
 #include <stdint.h>
+#include <dirent.h>
+#include <sys/stat.h>
 
 #define IMAGE_SZ (28*28)
 
@@ -197,41 +199,21 @@ void matmul_relu(float* xout, QuantizedTensor* x, QuantizedTensor* w, QuantizedT
     }
 }
 
-uint8_t matmul_final(QuantizedTensor* x, QuantizedTensor* w, QuantizedTensor* b, int n, int d) {
-    // argmax(W (d,n) @ x (n,) + b(d,))
-    // calculate matmul and return prediction from the resulting one hot encoded vector
-    float cmax = 0;
-    uint8_t index = 0;
-    int i;
-    #pragma omp parallel for private(i)
-    for (i = 0; i < d; i++) {
-        float val = 0.0f;
-        int32_t ival = 0;
-        int in = i * n;
-        // do the matmul in groups of GS
-        for (int j = 0; j < n; j += GS) {
-            for (int k = 0; k < GS; k++) {
-                ival += ((int32_t) x->q[j + k]) * ((int32_t) w->q[in + j + k]);
-            }
-            val += ((float) ival) * w->s[(in + j) / GS] * x->s[j / GS];
-            ival = 0;
-        }
-        val += ((float) b->q[i]) * b->s[i / d];
-        if (val > cmax) {
-            cmax = val;
-            index = (uint8_t) i;
-        }
-    }
-    return index;
-}
-
 void normalize(float* xout, uint8_t* input) {
     for (int i = 0; i < IMAGE_SZ; i++) {
         xout[i] = ((float) input[i] / 255 - 0.5) / 0.5;
     }
 }
 
-uint8_t forward_one(Model* m, uint8_t* input) {
+// sanity check function
+void write_activation(float* x, int size) {
+    FILE* f = fopen("actcq8.txt", "w");
+    for (int i = 0; i < size; i++)
+        fprintf(f, "%f\n", x[i]);
+    fclose(f);
+}
+
+float* forward_one(Model* m, uint8_t* input) {
     // forward step for one input
     Weights* w = &m->weights;
     int dim = m->config.dim;
@@ -239,7 +221,6 @@ uint8_t forward_one(Model* m, uint8_t* input) {
     Runstate* s = &m->state;
     float *x = s->x;
     QuantizedTensor xq = s->xq;
-    uint8_t out;
 
     normalize(x, input);
     quantize(&xq, x, IMAGE_SZ);
@@ -247,105 +228,134 @@ uint8_t forward_one(Model* m, uint8_t* input) {
     quantize(&xq, x, dim);
     matmul_relu(x, &xq, w->wh, w->bh, dim, dim/2);
     quantize(&xq, x, dim/2);
-    out = matmul_final(&xq, w->wo, w->bo, dim/2, nclass);
+    matmul(x, &xq, w->wo, w->bo, dim/2, nclass);
 
-    return out;
+    return x;
 }
 
-uint8_t* forward_all(Model* m, uint8_t** inputs, int size) {
-    // forward step for all inputs
-    uint8_t* outputs = malloc(size);
-    for (int i = 0; i < size; i++) {
-        outputs[i] = forward_one(m, inputs[i]);
+uint8_t find_max(float* x, int nclass) {
+    // find the maximum value of one hot encoded vector x (nclass,)
+    float cmax = 0;
+    uint8_t index = 0;
+    int i;
+    #pragma omp parallel for private(i)
+    for (i = 0; i < nclass; i++) {
+        if (x[i] > cmax) {
+            cmax = x[i];
+            index = (uint8_t) i;
+        }
     }
-    return outputs;
+    return index;
 }
 
-void read_mnist_images(char* path, uint8_t ***images, int *nimages) {
+void read_mnist_image(char* path, uint8_t *image) {
     FILE* file = fopen(path, "rb");
     if (!file) { perror("Error opening file"); exit(EXIT_FAILURE); }
-    // check if the magic number corresponds to MNIST image files
-    unsigned int magic_number;
-    fread(&magic_number, sizeof(uint32_t), 1, file);
-    magic_number = ntohl(magic_number);
-    if (magic_number != 0x00000803) { fprintf(stderr, "Invalid magic number\n"); exit(EXIT_FAILURE); }
-    // read number of images
-    fread(nimages, sizeof(uint32_t), 1, file);
-    *nimages = ntohl(*nimages);
-    // read number of rows and columns in each image
-    int rows; int cols;
-    fread(&rows, sizeof(uint32_t), 1, file);
-    fread(&cols, sizeof(uint32_t), 1, file);
-    rows = ntohl(rows);
-    cols = ntohl(cols);
     // allocate memory for the images array and read images
-    *images = malloc(sizeof(uint8_t*) * (*nimages));
-    for (int i = 0; i < *nimages; i++) {
-        (*images)[i] = malloc(sizeof(uint8_t) * rows * cols);
-        fread((*images)[i], sizeof(uint8_t), rows * cols, file);
+    fread(image, sizeof(uint8_t), IMAGE_SZ, file);
+    fclose(file);
+}
+
+void classify(Model* m, const char* dir_path, uint8_t* outputs, uint8_t* image, int* nimages) {
+    DIR* dir;
+    struct dirent* entry;
+    if ((dir = opendir(dir_path)) != NULL) {
+        int i = 0;
+        while (i < *nimages) {
+            if ((entry = readdir(dir)) != NULL) {
+                if (entry->d_type == DT_REG) {
+                    char file_path[100];
+                    snprintf(file_path, sizeof(file_path), "%s/%s", dir_path, entry->d_name);
+                    read_mnist_image(file_path, image);
+                    forward_one(m, image);  // now model output (nclass,) is stored in model.state.x
+                    outputs[i] = find_max(m->state.x, m->config.nclass);
+                    i += 1;
+                }
+            } else { *nimages = i; }
+        }
+        closedir(dir);
+    } else { printf("%s", dir_path);
+        perror("Unable to open directory"); exit(EXIT_FAILURE); }
+}
+
+float evaluate_model(Model* m, const char* base_path, uint8_t* image) {
+    float acc = 0;
+    int tot = 0;
+    int nimages = 1200; // 1200 because all directories contains <1200 files
+    uint8_t* outputs = malloc(nimages);
+    for (int i = 0; i < 10; i++) {
+        char dir_path[100];
+        snprintf(dir_path, sizeof(dir_path), "%s/%d", base_path, i);
+        nimages = 1200; // initialize at every step
+        classify(m, dir_path, outputs, image, &nimages);
+        tot += nimages;
+        for (int j = 0; j < nimages; j++) {
+            if (outputs[j] == i)
+                acc += 1;
+        }
     }
-    fclose(file);
+    free(outputs);
+    acc /= tot;
+    return acc;
 }
 
-void read_mnist_labels(char* path, uint8_t **labels, int *nlabels) {
-    FILE* file = fopen(path, "rb");
-    if (!file) { perror("Error opening file"); exit(EXIT_FAILURE); }
-    // check if the magic number corresponds to MNIST label files
-    unsigned int magic_number;
-    fread(&magic_number, sizeof(uint32_t), 1, file);
-    magic_number = ntohl(magic_number);
-    if (magic_number != 0x00000801) { fprintf(stderr, "%d", magic_number); exit(EXIT_FAILURE); }
-    // read the number of labels
-    fread(nlabels, sizeof(uint32_t), 1, file);
-    *nlabels = ntohl(*nlabels);
-    // allocate memory for the labels array and read labels
-    *labels = malloc(sizeof(uint8_t) * (*nlabels));
-    fread(*labels, sizeof(uint8_t), *nlabels, file);
-    fclose(file);
+void softmax(float* x, int size) {
+    // find max value (for numerical stability)
+    float max_val = x[0];
+    for (int i = 1; i < size; i++) {
+        if (x[i] > max_val) {
+            max_val = x[i];
+        }
+    }
+    // exp and sum
+    float sum = 0.0f;
+    for (int i = 0; i < size; i++) {
+        x[i] = expf(x[i] - max_val);
+        sum += x[i];
+    }
+    // normalize
+    for (int i = 0; i < size; i++) {
+        x[i] /= sum;
+    }
 }
 
+void test_model(Model* m, uint8_t* image) {
+    char* file_path = "data/MNIST/sorted/7/1012";
+    read_mnist_image(file_path, image);
+    forward_one(m, image);  // now model output (nclass,) is stored in model.state.x
+    softmax(m->state.x, m->config.nclass);
+}
+
+// sanity check function
 void write_params(Model* m, char* filepath) {
-    // writes a file to check if the model parameters are read correctly
     int dim = m->config.dim;
     int nclass = m->config.nclass;
-    FILE* f = fopen(filepath, "w");
-    // write model parameters
-    for (int i = 0; i < IMAGE_SZ*dim; i++) { fprintf(f, "%i\n", m->weights.wi->q[i]); }
-    for (int i = 0; i < dim*dim/2; i++) { fprintf(f, "%i\n", m->weights.wh->q[i]); }
-    for (int i = 0; i < dim*nclass/2; i++) { fprintf(f, "%i\n", m->weights.wo->q[i]); }
-    for (int i = 0; i < dim; i++) { fprintf(f, "%i\n", m->weights.bi->q[i]); }
-    for (int i = 0; i < dim/2; i++) { fprintf(f, "%i\n", m->weights.bh->q[i]); }
-    for (int i = 0; i < nclass; i++) { fprintf(f, "%i\n", m->weights.bo->q[i]); }
-    // write scale factors
-    for (int i = 0; i < IMAGE_SZ*dim/GS; i++) { fprintf(f, "%.12f\n", m->weights.wi->s[i]); }
-    for (int i = 0; i < dim*dim/2/GS; i++) { fprintf(f, "%.12f\n", m->weights.wh->s[i]); }
-    for (int i = 0; i < dim*nclass/2/GS; i++) { fprintf(f, "%.12f\n", m->weights.wo->s[i]); }
-    for (int i = 0; i < dim/GS; i++) { fprintf(f, "%.12f\n", m->weights.bi->s[i]); }
-    for (int i = 0; i < dim/2/GS; i++) { fprintf(f, "%.12f\n", m->weights.bh->s[i]); }
-    fprintf(f, "%.12f\n", m->weights.bo->s[0]);
-    fclose(f); 
-
-}
-
-void write_output(uint8_t* outputs, char* filepath, int size) {
-    // writes a file to check if the model parameters are read correctly
-    FILE* f = fopen(filepath, "w");
-    for (int i = 0; i < size; i++)
-        fprintf(f, "%i\n", outputs[i]);
-    fclose(f); 
-}
-
-void print_accuracy(uint8_t* outputs, uint8_t* labels, int n) {
-    int count = 0;
-    for (int i = 0; i < n; i++) {
-        if (outputs[i]==labels[i])
-            count += 1;
-    }
-    printf("Accuracy: %.2f %%", 100 * (float) count / n);
+    FILE* f = fopen(filepath, "wb");
+    // write model parameters and scaling factors
+    fwrite(&(m->config), sizeof(Config), 1, f);
+    fwrite(&GS, sizeof(int), 1, f);
+    fwrite(m->weights.wi->q, 1, IMAGE_SZ * dim, f);
+    fwrite(m->weights.wi->s, sizeof(float), IMAGE_SZ*dim/GS, f);
+    fwrite(m->weights.wh->q, 1, dim*dim/2, f);
+    fwrite(m->weights.wh->s, sizeof(float), dim*dim/2/GS, f);
+    fwrite(m->weights.wo->q, 1, dim*nclass/2, f);
+    fwrite(m->weights.wo->s, sizeof(float), dim*nclass/2/GS, f);
+    fwrite(m->weights.bi->q, 1, dim, f);
+    fwrite(m->weights.bi->s, sizeof(float), dim/GS, f);
+    fwrite(m->weights.bh->q, 1, dim/2, f);
+    fwrite(m->weights.bh->s, sizeof(float), dim/2/GS, f);
+    fwrite(m->weights.bo->q, 1, nclass, f);
+    fwrite(m->weights.bo->s, sizeof(float), 1, f);
+    fclose(f);
 }
 
 void error_usage() {
     fprintf(stderr, "Usage:   run <checkpoint>\n");
+    fprintf(stderr, "Example: run model.bin -c 5 -n 10\n");
+    fprintf(stderr, "Options:\n");
+    fprintf(stderr, "  -c <int>       class in {0,1,2,...,9}, default 0\n");
+    fprintf(stderr, "  -n <int>       number of images to classify, default 5\n");
+    fprintf(stderr, "  -m <string>    mode: classify|test, default classify\n");
     exit(EXIT_FAILURE);
 }
 
@@ -353,45 +363,57 @@ int main(int argc, char** argv) {
 
     // default parameters
     char *checkpoint_path = NULL;  // e.g. out/model.bin
+    int nimages = 5;  // number of images to classify
+    uint8_t label = 0;  // image class to classify
+    char* mode = "classify";
 
-    // read a model path
-    if (argc == 2) { checkpoint_path = argv[1]; } else { error_usage(); }
-
-    // read images
-    char* input_path = "data/MNIST/raw/t10k-images-idx3-ubyte";
-    int nimages;
-    uint8_t** images;
-    read_mnist_images(input_path, &images, &nimages);
-    // read labels
-    input_path = "data/MNIST/raw/t10k-labels-idx1-ubyte";
-    int nlabels;
-    uint8_t* labels;
-    read_mnist_labels(input_path, &labels, &nlabels);
-
-    if (nlabels!=nimages) {
-        fprintf(stderr, "Number of labels (%d) does not match the number of images (%d)\n", nlabels, nimages);
-        exit(EXIT_FAILURE);
+    // read a model path, number of images and label to classify if given
+    if (argc >= 2) { checkpoint_path = argv[1]; } else { error_usage(); }
+    for (int i = 2; i < argc; i+=2) {
+        // do some basic validation
+        if (i + 1 >= argc) { error_usage(); } // must have arg after flag
+        if (argv[i][0] != '-') { error_usage(); } // must start with dash
+        if (strlen(argv[i]) != 2) { error_usage(); } // must be -x (one dash, one letter)
+        // read in the args
+        if (argv[i][1] == 'c') {
+            int val = atoi(argv[i + 1]);
+            if (val >= 0 && val <= 9) { label = val; } else { error_usage(); }
+        }
+        else if (argv[i][1] == 'n') { nimages = atoi(argv[i + 1]); }
+        else if (argv[i][1] == 'm') { mode = argv[i + 1]; }
+        else { error_usage(); }
     }
 
-    // build the model via model.bin file 
     Model model;
     build_model(&model, checkpoint_path);
 
-    // run
-    uint8_t* outputs = forward_all(&model, images, nimages);
+    char* base_path = "data/MNIST/sorted";
+    uint8_t* image = malloc(IMAGE_SZ);
 
-    // check the weights and outputs are valid
-    //write_weights(&model, "weightsc.txt");
-    //write_output(outputs, "outputc.txt", nimages);
-    print_accuracy(outputs, labels, nlabels);
+    if (strcmp(mode, "classify") == 0) {
+        char dir_path[100];
+        snprintf(dir_path, sizeof(dir_path), "%s/%d", base_path, label);
+        uint8_t* outputs = malloc(nimages);
+        classify(&model, dir_path, outputs, image, &nimages);
+        for (int i = 0; i < nimages; i++) {
+            printf("%i\n", outputs[i]);
+        }
+        free(outputs);
+    } else if (strcmp(mode, "classifyall") == 0) {
+        float acc = evaluate_model(&model, base_path, image);
+        printf("Accuracy: %f\n", acc);
+    } else if (strcmp(mode, "test") == 0) {
+        test_model(&model, image);
+        for (int i = 0; i < model.config.nclass; i++) {
+            printf("%.12f\n", model.state.x[i]);
+        }
+    } else {
+        fprintf(stderr, "unknown mode: %s\n", mode);
+        error_usage();
+    }
 
     // memory and file handles cleanup
-    for (int i = 0; i < nimages; i++) {
-        free(images[i]);
-    }
-    free(images);
-    free(labels);
-    free(outputs);
+    free(image);
     free_model(&model);
     return 0;
 }
