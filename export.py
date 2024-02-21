@@ -49,14 +49,8 @@ def export_model(model, file_path = "model.bin"):
     header = struct.pack("ii", model.dim, model.nclass)
     f.write(header) 
     # write the model weights and biases
-    weights = [*[layer.weight for layer in model.layers], model.out.weight]
-    bias = [*[layer.bias for layer in model.layers], model.out.bias]
-    
-    for w in weights:
-        serialize_fp32(f, w)
-    
-    for b in bias:
-        serialize_fp32(f, b)
+    for p in model.parameters():
+        serialize_fp32(f, p)
 
     f.close()
     print(f"wrote {file_path}")
