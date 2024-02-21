@@ -4,19 +4,27 @@ import torch
 from torch import nn
 
 class Model(nn.Module):
-    def __init__(self, dim=128):
+    def __init__(self):
         super(Model, self).__init__()
+        dim = 128
         self.dim = dim
         self.nclass = 10
+
+        self.conv1 = nn.Conv2d(1, 4, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv2d(4, 8, kernel_size=3, padding=1)
+        self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
+
         self.flatten = nn.Flatten()
-        self.layers = nn.ModuleList([nn.Linear(28*28, dim), 
-                                    nn.Linear(dim, dim//2)])
-        self.activation = nn.ReLU()
-        self.out = nn.Linear(dim//2, self.nclass)
+        self.fc1 = nn.Linear(8*7*7, dim)
+        self.fc2 = nn.Linear(dim, self.nclass)
+        self.relu = nn.ReLU()
         
     def forward(self, x):
+        x = self.relu(self.conv1(x))
+        x = self.pool(x)
+        x = self.pool(self.relu(self.conv2(x)))
         x = self.flatten(x)
-        for layer in self.layers:
-            x = self.activation(layer(x))
-        x = self.out(x)
+        x = self.relu(self.fc1(x))
+        x = self.fc2(x)
+
         return x
