@@ -5,22 +5,22 @@ import struct
 import numpy as np
 
 def serialize_fp32(file, tensor):
-    """ write one fp32 tensor to file that is open in wb mode """
+    ''' Write one fp32 tensor to file that is open in wb mode '''
     d = tensor.detach().cpu().view(-1).to(torch.float32).numpy()
     b = struct.pack(f'{len(d)}f', *d)
     file.write(b)
 
 def serialize_int8(file, tensor):
-    """ write one int8 tensor to file that is open in wb mode """
+    ''' Write one int8 tensor to file that is open in wb mode '''
     d = tensor.detach().cpu().view(-1).numpy().astype(np.int8)
     b = struct.pack(f'{len(d)}b', *d)
     file.write(b)
 
 def quantize_q80(w, group_size):
-    """
-    takes a tensor and returns the Q8_0 quantized version
+    '''
+    Take a tensor and returns the Q8_0 quantized version
     i.e. symmetric quantization into int8, range [-127,127]
-    """
+    '''
     assert w.numel() % group_size == 0
     ori_shape = w.shape
     w = w.float() # convert to float32
@@ -42,8 +42,14 @@ def quantize_q80(w, group_size):
     maxerr = err.max().item()
     return int8val, scale, maxerr
 
-def export_model(model, file_path = "model.bin"):
-    ''' export the model to filepath '''
+def export_model(model, file_path="model.bin"):
+    '''
+    Export the model to a file at the specified filepath
+    The data inside the file follows this order:
+    1. Number of classes, CNN layers, and FC layers.
+    2. CNN and FC layers' configuration.
+    3. CNN and FC layers' parameters.
+    '''
     f = open(file_path, "wb")
     # write model config
     conv_layers = [model.conv1, model.conv2]
