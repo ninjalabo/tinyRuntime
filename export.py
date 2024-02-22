@@ -45,12 +45,33 @@ def quantize_q80(w, group_size):
 def export_model(model, file_path = "model.bin"):
     ''' export the model to filepath '''
     f = open(file_path, "wb")
-    # write the model structure 
-    header = struct.pack("ii", model.dim, model.nclass)
-    f.write(header) 
-    # write the model weights and biases
-    for p in model.parameters():
-        serialize_fp32(f, p)
+    # write model config
+    conv_layers = [model.conv1, model.conv2]
+    nconv = len(conv_layers)
+    linear_layers = [model.fc1, model.fc2]
+    nlinear = len(linear_layers)
+    header = struct.pack("iii", model.nclasses, nconv, nlinear)
+    f.write(header)
+    # write layers' config
+    offset = 0 # the number of bytes in float32 (i.e. offset 1 = 4 bytes)
+    for layer in conv_layers:
+        f.write(struct.pack("6i", layer.kernel_size[0], layer.stride[0], layer.padding[0],
+                layer.in_channels, layer.out_channels, offset))
+        # set offset to the start of next layer
+        offset += layer.out_channels*layer.in_channels*layer.kernel_size[0]**2 + layer.out_channels
+
+    for layer in linear_layers:
+        f.write(struct.pack("3i", layer.in_features, layer.out_features, offset))
+        offset += layer.in_features*layer.out_features + layer.out_features
+
+    # write the weights and biases of the model
+    for layer in conv_layers:
+        for p in layer.parameters():
+            serialize_fp32(f, p)
+
+    for layer in linear_layers:
+        for p in layer.parameters():
+            serialize_fp32(f, p)
 
     f.close()
     print(f"wrote {file_path}")
@@ -62,7 +83,7 @@ def export_modelq8(model_path="model.pt", file_path="modelq8.bin", gs=64):
     model = torch.load(model_path)
     f = open(file_path, "wb")
     # write the model structure 
-    header = struct.pack("iii", model.dim, model.nclass, gs)
+    header = struct.pack("iii", model.dim, model.nclasses, gs)
     f.write(header) 
     # quantize and write the model weights and biases
     weights = [*[layer.weight for layer in model.layers], model.out.weight]
@@ -71,8 +92,8 @@ def export_modelq8(model_path="model.pt", file_path="modelq8.bin", gs=64):
 
     ew = []
     for i, p in enumerate(params):
-        if i==len(params)-1 and gs>model.nclass:
-            gs = model.nclass
+        if i==len(params)-1 and gs>model.nclasses:
+            gs = model.nclasses
         # quantize this weight
         q, s, err = quantize_q80(p, gs)
         # save the int8 weights to file
