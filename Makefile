@@ -3,8 +3,8 @@
 CC = gcc
 
 compile: 
-	$(CC) -Os run.c -lm -o run
-	$(CC) -Os runq.c -lm -o runq
+	$(CC) -Os -Wall run.c -lm -o run
+	$(CC) -Os -Wall runq.c -lm -o runq
 
 clean:
 	rm -f run runq
