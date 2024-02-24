@@ -1,4 +1,3 @@
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <ctype.h>
@@ -14,7 +13,7 @@
 
 #define IMAGE_SZ (28*28)
 
-int GS = 0;			// group size global for quantization of the weights
+static int GS;			// group size global for quantization of the weights
 
 typedef struct {
 	int8_t *q;		// quantized values
@@ -49,7 +48,7 @@ typedef struct {
 	size_t file_size;	// size of the checkpoint file in bytes
 } Model;
 
-void malloc_run_state(Runstate * s)
+static void malloc_run_state(Runstate *s)
 {
 	int inp_dim = IMAGE_SZ;
 	s->x = calloc(inp_dim, sizeof(float));
@@ -58,14 +57,14 @@ void malloc_run_state(Runstate * s)
 		    calloc(inp_dim / GS + 1, sizeof(float))};
 }
 
-void free_run_state(Runstate * s)
+static void free_run_state(Runstate *s)
 {
 	free(s->x);
 	free(s->xq.q);
 	free(s->xq.s);
 }
 
-void quantize(QuantizedTensor * qx, float *x, int n)
+static void quantize(QuantizedTensor *qx, float *x, int n)
 {
 	int num_groups = n / GS;
 	float Q_MAX = 127.0f;
@@ -92,7 +91,7 @@ void quantize(QuantizedTensor * qx, float *x, int n)
 	}
 }
 
-QuantizedTensor *init_quantized_tensors(void **ptr, int n, int size_each)
+static QuantizedTensor *init_quantized_tensors(void **ptr, int n, int size_each)
 {
 	void *p = *ptr;
 	QuantizedTensor *res = malloc(n * sizeof(QuantizedTensor));
@@ -108,7 +107,7 @@ QuantizedTensor *init_quantized_tensors(void **ptr, int n, int size_each)
 	return res;
 }
 
-void memory_map_weights(Weights * w, Config * c, void *ptr)
+static void memory_map_weights(Weights *w, Config *c, void *ptr)
 {
 	// maps memory for the weights and bias of each layer
 	int dim = c->dim;
@@ -121,7 +120,7 @@ void memory_map_weights(Weights * w, Config * c, void *ptr)
 	w->bo = init_quantized_tensors(&ptr, 1, nclass);
 }
 
-void read_checkpoint(char *path, Config * config, Weights * weigths, int *fd,
+static void read_checkpoint(char *path, Config *config, Weights *weigths, int *fd,
 		     float **data, size_t *file_size)
 {
 	FILE *file = fopen(path, "rb");
@@ -157,7 +156,7 @@ void read_checkpoint(char *path, Config * config, Weights * weigths, int *fd,
 	memory_map_weights(weigths, config, weights_ptr);
 }
 
-void build_model(Model * m, char *checkpoint_path)
+static void build_model(Model * m, char *checkpoint_path)
 {
 	// read in the Config and the Weights from the checkpoint
 	read_checkpoint(checkpoint_path, &m->config, &m->weights, &m->fd,
@@ -166,7 +165,7 @@ void build_model(Model * m, char *checkpoint_path)
 	malloc_run_state(&m->state);
 }
 
-void free_model(Model * m)
+static void free_model(Model *m)
 {
 	// free QuantizedTensors
 	free(m->weights.wi);
@@ -186,13 +185,13 @@ void free_model(Model * m)
 	free_run_state(&m->state);
 }
 
-void linear(float *xout, QuantizedTensor * x, QuantizedTensor * w,
-	    QuantizedTensor * b, int n, int d)
+static void linear(float *xout, QuantizedTensor *x, QuantizedTensor *w,
+	    QuantizedTensor *b, int n, int d)
 {
 	// linear layer: w(d,n) @ x (n,) + b(d,) -> xout (d,)
 	// by far the most amount of time is spent inside this little function
 	int i;
-#pragma omp parallel for private(i)
+	//#pragma omp parallel for private(i)
 	for (i = 0; i < d; i++) {
 		float val = 0.0f;
 		int32_t ival = 0;
@@ -212,13 +211,13 @@ void linear(float *xout, QuantizedTensor * x, QuantizedTensor * w,
 	}
 }
 
-void linear_with_relu(float *xout, QuantizedTensor * x, QuantizedTensor * w,
-		      QuantizedTensor * b, int n, int d)
+static void linear_with_relu(float *xout, QuantizedTensor *x, QuantizedTensor *w,
+		      QuantizedTensor *b, int n, int d)
 {
 	// linear layer with ReLU activation: w(d,n) @ x (n,) + b(d,) -> xout (d,)
 	// by far the most amount of time is spent inside this little function
 	int i;
-#pragma omp parallel for private(i)
+	//#pragma omp parallel for private(i)
 	for (i = 0; i < d; i++) {
 		float val = 0.0f;
 		int32_t ival = 0;
@@ -238,7 +237,7 @@ void linear_with_relu(float *xout, QuantizedTensor * x, QuantizedTensor * w,
 	}
 }
 
-void normalize(float *xout, uint8_t * image)
+static void normalize(float *xout, uint8_t * image)
 {
 	// normalize values [0, 255] -> [-1, 1]
 	for (int i = 0; i < IMAGE_SZ; i++) {
@@ -246,7 +245,7 @@ void normalize(float *xout, uint8_t * image)
 	}
 }
 
-void softmax(float *x, int size)
+static void softmax(float *x, int size)
 {
 	// find max value (for numerical stability)
 	float max_val = x[0];
@@ -267,27 +266,35 @@ void softmax(float *x, int size)
 	}
 }
 
-void read_mnist_image(char *path, uint8_t * image)
+static void read_mnist_image(char *path, uint8_t * image)
 {
+	size_t bytes;
 	FILE *file = fopen(path, "rb");
 	if (!file) {
 		perror("Error opening file");
 		exit(EXIT_FAILURE);
 	}
-	fread(image, sizeof(uint8_t), IMAGE_SZ, file);
+	bytes = fread(image, sizeof(uint8_t), IMAGE_SZ, file);
+	if (!bytes) {
+		perror("Error reading file");
+		exit(EXIT_FAILURE);
+	}
 	fclose(file);
 }
 
-// sanity check function for writing tensors, e.g., it can be used to evaluate values after a specific layer.
-void write_tensor(float *x, int size)
+#ifdef DEBUG
+// sanity check function for writing tensors,
+// e.g., it can be used to evaluate values after a specific layer.
+static void write_tensor(float *x, int size)
 {
 	FILE *f = fopen("actc.txt", "w");
 	for (int i = 0; i < size; i++)
 		fprintf(f, "%f\n", x[i]);
 	fclose(f);
 }
+#endif
 
-void forward(Model * m, uint8_t * image)
+static void forward(Model * m, uint8_t * image)
 {
 	Weights *w = &m->weights;
 	int dim = m->config.dim;
@@ -306,7 +313,7 @@ void forward(Model * m, uint8_t * image)
 	softmax(x, nclass);
 }
 
-void error_usage()
+static void error_usage()
 {
 	fprintf(stderr, "Usage:   run <model> <image>\n");
 	fprintf(stderr, "Example: run modelq8.bin image1 image2 ... imageN\n");

@@ -1,4 +1,3 @@
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <ctype.h>
@@ -51,19 +50,19 @@ typedef struct {
 	size_t file_size;	// size of the checkpoint file in bytes
 } Model;
 
-void malloc_run_state(Runstate * s)
+static void malloc_run_state(Runstate * s)
 {
 	s->x = calloc(9 * 28 * 28, sizeof(float));
 	s->x2 = calloc(4 * 28 * 28, sizeof(float));
 }
 
-void free_run_state(Runstate * s)
+static void free_run_state(Runstate * s)
 {
 	free(s->x);
 	free(s->x2);
 }
 
-void read_checkpoint(char *path, ModelConfig * config, ConvConfig ** cl,
+static void read_checkpoint(char *path, ModelConfig * config, ConvConfig ** cl,
 		     LinearConfig ** ll, float **parameters, int *fd,
 		     float **data, size_t *file_size)
 {
@@ -104,7 +103,7 @@ void read_checkpoint(char *path, ModelConfig * config, ConvConfig ** cl,
 	*parameters = *data + header_size / sizeof(float);	// position the parameters pointer to the start of the parameter data
 }
 
-void build_model(Model * m, char *checkpoint_path)
+static void build_model(Model * m, char *checkpoint_path)
 {
 	// read in the Config and the Weights from the checkpoint
 	read_checkpoint(checkpoint_path, &m->model_config, &m->conv_config,
@@ -114,7 +113,7 @@ void build_model(Model * m, char *checkpoint_path)
 	malloc_run_state(&m->state);
 }
 
-void free_model(Model * m)
+static void free_model(Model * m)
 {
 	// close the memory mapping
 	if (m->data != MAP_FAILED) {
@@ -127,14 +126,14 @@ void free_model(Model * m)
 	free_run_state(&m->state);
 }
 
-void linear(float *xout, float *x, float *p, int in, int out)
+static void linear(float *xout, float *x, float *p, int in, int out)
 {
 	// linear layer: w(out,in) @ x (in,) + b(out,) -> xout (out,)
 	// by far the most amount of time is spent inside this little function
 	int i;
 	float *w = p;
 	float *b = p + in * out;
-#pragma omp parallel for private(i)
+	//#pragma omp parallel for private(i)
 	for (i = 0; i < out; i++) {
 		float val = 0.0f;
 		for (int j = 0; j < in; j++) {
@@ -144,13 +143,13 @@ void linear(float *xout, float *x, float *p, int in, int out)
 	}
 }
 
-void linear_with_relu(float *xout, float *x, float *p, int in, int out)
+static void linear_with_relu(float *xout, float *x, float *p, int in, int out)
 {
 	// linear layer with ReLU activation: w(out,in) @ x (in,) + b(out,) -> xout (out,)
 	int i;
 	float *w = p;
 	float *b = p + in * out;
-#pragma omp parallel for private(i)
+	//#pragma omp parallel for private(i)
 	for (i = 0; i < out; i++) {
 		float val = 0.0f;
 		for (int j = 0; j < in; j++) {
@@ -160,14 +159,14 @@ void linear_with_relu(float *xout, float *x, float *p, int in, int out)
 	}
 }
 
-void matmul_conv_with_relu(float *xout, float *x, float *p, int nchannels,
+static void matmul_conv_with_relu(float *xout, float *x, float *p, int nchannels,
 			   int in, int out)
 {
 	// w (nchannels,1,in) @ x (1,in,out) + b(chan,) -> xout (nchannels,out)
 	int c;
 	float *w = p;
 	float *b = p + nchannels * in;
-#pragma omp parallel for private(c)
+	//#pragma omp parallel for private(c)
 	for (c = 0; c < nchannels; c++) {
 		for (int i = 0; i < out; i++) {
 			float val = 0.0f;
@@ -179,7 +178,7 @@ void matmul_conv_with_relu(float *xout, float *x, float *p, int nchannels,
 	}
 }
 
-float im2col_get_pixel(float *im, int height, int width, int row, int col,
+static float im2col_get_pixel(float *im, int height, int width, int row, int col,
 		       int channel, int pad)
 {
 	row -= pad;
@@ -189,7 +188,7 @@ float im2col_get_pixel(float *im, int height, int width, int row, int col,
 	return im[col + width * (row + height * channel)];
 }
 
-void im2col_cpu(float *col, float *im, int nchannels, int height, int width,
+static void im2col_cpu(float *col, float *im, int nchannels, int height, int width,
 		int ksize, int stride, int pad)
 {
 	// im (nchannels, height, width) -> col (col_size, out_height * out_width)
@@ -217,7 +216,7 @@ void im2col_cpu(float *col, float *im, int nchannels, int height, int width,
 	}
 }
 
-void maxpool(float *x, int height, int width, int nchannels, int ksize)
+static void maxpool(float *x, int height, int width, int nchannels, int ksize)
 {
 	int out_height = height / ksize;
 	int out_width = width / ksize;
@@ -241,7 +240,7 @@ void maxpool(float *x, int height, int width, int nchannels, int ksize)
 	}
 }
 
-void normalize(float *xout, uint8_t * image)
+static void normalize(float *xout, uint8_t * image)
 {
 	// normalize values [0, 255] -> [-1, 1]
 	for (int i = 0; i < IMAGE_SZ; i++) {
@@ -249,7 +248,7 @@ void normalize(float *xout, uint8_t * image)
 	}
 }
 
-void softmax(float *x, int size)
+static void softmax(float *x, int size)
 {
 	// find max value (for numerical stability)
 	float max_val = x[0];
@@ -270,27 +269,34 @@ void softmax(float *x, int size)
 	}
 }
 
-void read_mnist_image(char *path, uint8_t * image)
+static void read_mnist_image(char *path, uint8_t * image)
 {
+	size_t bytes;
 	FILE *file = fopen(path, "rb");
 	if (!file) {
 		perror("Error opening file");
 		exit(EXIT_FAILURE);
 	}
-	fread(image, sizeof(uint8_t), IMAGE_SZ, file);
+	bytes = fread(image, sizeof(uint8_t), IMAGE_SZ, file);
+	if (!bytes) {
+		perror("Error reading file");
+		exit(EXIT_FAILURE);
+	}
 	fclose(file);
 }
 
+#ifdef DEBUG
 // sanity check function for writing tensors, e.g., it can be used to evaluate values after a specific layer.
-void write_tensor(float *x, int size)
+static void write_tensor(float *x, int size)
 {
 	FILE *f = fopen("tensor.txt", "w");
 	for (int i = 0; i < size; i++)
 		fprintf(f, "%f\n", x[i]);
 	fclose(f);
 }
+#endif
 
-void forward(Model * m, uint8_t * image)
+static void forward(Model * m, uint8_t * image)
 {
 	ConvConfig *cl = m->conv_config;
 	LinearConfig *ll = m->linear_config;
@@ -315,7 +321,7 @@ void forward(Model * m, uint8_t * image)
 	softmax(x2, ll[1].out);
 }
 
-void error_usage()
+static void error_usage()
 {
 	fprintf(stderr, "Usage:   run <model> <image>\n");
 	fprintf(stderr, "Example: run model.bin image1 image2 ... imageN\n");
