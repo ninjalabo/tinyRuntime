@@ -43,7 +43,7 @@ def train_model(model):
     opt = torch.optim.AdamW(model.parameters(), lr=0.001)
     trainloader, testloader = generate_dataloader()
 
-    for epoch in range(3):
+    for epoch in range(1):
 
         model.train()
         tloss = 0
