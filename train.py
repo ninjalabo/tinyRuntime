@@ -1,17 +1,8 @@
 # Don't edit this file! This was automatically generated from "train.ipynb".
 
-import numpy as np
 import torchvision
 from torchvision import transforms
-import torch
 from torch import nn
-import matplotlib.pyplot as plt
-import struct
-import os
-
-from model import Model # my model
-from export import export_model
-from export import export_modelq8
 
 def generate_dataloader(batch_size=32):
     transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.5,), (0.5,))])
@@ -33,7 +24,7 @@ def test_model(model, testloader):
         for X,y in testloader:
             out = model(X)
             vloss += loss_fn(out, y).item()
-            correct += (torch.argmax(out, 1)==y).float().sum()
+            correct += (torch.argmax(out, 1)==y).float().sum().item()
     
     return vloss/len(testloader),  correct/len(testloader.dataset)
 
