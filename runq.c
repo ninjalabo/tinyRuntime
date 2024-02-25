@@ -1,3 +1,5 @@
+/* Copyright (c) 2024 NinjaLABO https://ninjalabo.ai */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <ctype.h>
