@@ -9,4 +9,10 @@ compile:
 clean:
 	rm -f run runq
 
-.PHONY: clean compile
+cached_ipynb = $(shell git diff --cached --name-only)
+pyfiles = $(patsubst %.ipynb,%.py,$(cached_ipynb))
+py:
+	for x in $(cached_ipynb); do ./nbexport $$x; done
+	git add $(pyfiles)
+
+.PHONY: clean compile py
