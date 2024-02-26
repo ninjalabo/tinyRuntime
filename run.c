@@ -16,24 +16,24 @@
 #define IMAGE_SZ (28*28)
 
 typedef struct {
-	uint8_t nclasses;	// the number of classes
-	uint8_t nconv;		// the number of convolutional layers
-	uint8_t nlinear;	// the number of linear layers
+	int nclasses;		// the number of classes
+	int nconv;		// the number of convolutional layers
+	int nlinear;		// the number of linear layers
 } ModelConfig;
 
 typedef struct {
-	uint8_t in;		// input dimension
-	uint8_t out;		// output dimension
-	uint8_t offset;		// the position of the layer parameters in the "parameters" array within the "Model" struct
+	int in;			// input dimension
+	int out;		// output dimension
+	int offset;		// the position of the layer parameters in the "parameters" array within the "Model" struct
 } LinearConfig;
 
 typedef struct {
-	uint8_t ksize;		// kernel size
-	uint8_t stride;
-	uint8_t pad;		// padding
-	uint8_t ic;		// input channels
-	uint8_t oc;		// output channels
-	uint8_t offset;		// the position of the layer parameters in the "parameters" array within the "Model" struct
+	int ksize;		// kernel size
+	int stride;
+	int pad;		// padding
+	int ic;			// input channels
+	int oc;			// output channels
+	int offset;		// the position of the layer parameters in the "parameters" array within the "Model" struct
 } ConvConfig;
 
 typedef struct {
