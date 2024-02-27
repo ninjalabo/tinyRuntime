@@ -56,18 +56,18 @@ def export_model(model, file_path="model.bin"):
     nconv = len(conv_layers)
     linear_layers = [model.fc1, model.fc2]
     nlinear = len(linear_layers)
-    header = struct.pack("bbb", model.nclasses, nconv, nlinear)
+    header = struct.pack("iii", model.nclasses, nconv, nlinear)
     f.write(header)
     # write layers' config
     offset = 0 # the number of bytes in float32 (i.e. offset 1 = 4 bytes)
     for layer in conv_layers:
-        f.write(struct.pack("6b", layer.kernel_size[0], layer.stride[0], layer.padding[0],
+        f.write(struct.pack("6i", layer.kernel_size[0], layer.stride[0], layer.padding[0],
                 layer.in_channels, layer.out_channels, offset))
         # set offset to the start of next layer
         offset += layer.out_channels*layer.in_channels*layer.kernel_size[0]**2 + layer.out_channels
 
     for layer in linear_layers:
-        f.write(struct.pack("3b", layer.in_features, layer.out_features, offset))
+        f.write(struct.pack("3i", layer.in_features, layer.out_features, offset))
         offset += layer.in_features*layer.out_features + layer.out_features
 
     # write the weights and biases of the model
