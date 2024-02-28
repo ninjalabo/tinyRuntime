@@ -218,28 +218,29 @@ static void im2col_cpu(float *col, float *im, int nchannels, int height, int wid
 	}
 }
 
-static void maxpool(float *x, int height, int width, int nchannels, int ksize)
+static void maxpool(float *xout, float *x, int height, int width, int nchannels, int ksize, int stride, int pad)
 {
-	int out_height = height / ksize;
-	int out_width = width / ksize;
-	for (int c = 0; c < nchannels; c++) {
-		int xout_idx = c * out_height * out_width;	// start index for x
-		for (int i = 0; i < out_height; i++) {
-			for (int j = 0; j < out_width; j++) {
-				float cmax = 0;
-				int x_idx = c * height * width + 2 * (i * width + j);	// start index for x
-				for (int ki = 0; ki < ksize; ki++) {
-					for (int kj = 0; kj < ksize; kj++) {
-						cmax =
-						    fmax(cmax,
-							 x[x_idx + ki * width +
-							   kj]);
-					}
-				}
-				x[xout_idx + i * out_width + j] = cmax;
-			}
-		}
-	}
+    int out_height = (height + 2 * pad - ksize) / stride + 1;
+    int out_width = (width + 2 * pad - ksize) / stride + 1;
+
+    for (int c = 0; c < nchannels; c++) {
+        int xout_idx = c * out_height * out_width; // start index for xout
+        for (int i = 0; i < out_height; i++) {
+            for (int j = 0; j < out_width; j++) {
+                float cmax = 0;
+                for (int ki = 0; ki < ksize; ki++) {
+                    for (int kj = 0; kj < ksize; kj++) {
+                        int input_row = i * stride + ki - pad;
+                        int input_col = j * stride + kj - pad;
+                        if (input_row >= 0 && input_row < height && input_col >= 0 && input_col < width) {
+                            cmax = fmax(cmax, x[c * height * width + input_row * width + input_col]);
+                        }
+                    }
+                }
+                xout[xout_idx + i * out_width + j] = cmax;
+            }
+        }
+    }
 }
 
 static void normalize(float *xout, uint8_t * image)
@@ -307,20 +308,20 @@ static void forward(Model * m, uint8_t * image)
 	float *x = s->x;
 	float *x2 = s->x2;
 
-	normalize(x2, image);
-	im2col_cpu(x, x2, cl[0].ic, 28, 28, cl[0].ksize, cl[0].stride,
+	normalize(x, image);
+	im2col_cpu(x2, x, cl[0].ic, 28, 28, cl[0].ksize, cl[0].stride,
 		   cl[0].pad);
-	matmul_conv_with_relu(x2, x, p + cl[0].offset, cl[0].oc,
+	matmul_conv_with_relu(x, x2, p + cl[0].offset, cl[0].oc,
 			      cl[0].ic * cl[0].ksize * cl[0].ksize, 28 * 28);
-	maxpool(x2, 28, 28, cl[0].oc, 2);
+	maxpool(x2, x, 28, 28, cl[0].oc, 2, 2, 0);
 	im2col_cpu(x, x2, cl[1].ic, 14, 14, cl[1].ksize, cl[1].stride,
 		   cl[1].pad);
 	matmul_conv_with_relu(x2, x, p + cl[1].offset, cl[1].oc,
 			      cl[1].ic * cl[1].ksize * cl[1].ksize, 14 * 14);
-	maxpool(x2, 14, 14, cl[1].oc, 2);
-	linear_with_relu(x, x2, p + ll[0].offset, ll[0].in, ll[0].out);
-	linear(x2, x, p + ll[1].offset, ll[1].in, ll[1].out);
-	softmax(x2, ll[1].out);
+	maxpool(x, x2, 14, 14, cl[1].oc, 2, 2, 0);
+	linear_with_relu(x2, x, p + ll[0].offset, ll[0].in, ll[0].out);
+	linear(x, x2, p + ll[1].offset, ll[1].in, ll[1].out);
+	softmax(x, ll[1].out);
 }
 
 static void error_usage()
@@ -349,7 +350,7 @@ int main(int argc, char **argv)
 		read_mnist_image(image_path, image);
 		forward(&model, image);	// output (nclasses,) is stored in model.state.x2
 		for (int j = 0; j < model.model_config.nclasses; j++) {
-			printf("%f\t", model.state.x2[j]);
+			printf("%f\t", model.state.x[j]);
 		}
 		printf("\n");
 	}

@@ -383,28 +383,29 @@ static void im2col_cpu(float *col, float *im, int nchannels, int height, int wid
 // 	}
 // }
 
-static void maxpool(float *x, int height, int width, int nchannels, int ksize)
+static void maxpool(float *xout, float *x, int height, int width, int nchannels, int ksize, int stride, int pad)
 {
-	int out_height = height / ksize;
-	int out_width = width / ksize;
-	for (int c = 0; c < nchannels; c++) {
-		int xout_idx = c * out_height * out_width;	// start index for x
-		for (int i = 0; i < out_height; i++) {
-			for (int j = 0; j < out_width; j++) {
-				float cmax = 0;
-				int x_idx = c * height * width + 2 * (i * width + j);	// start index for x
-				for (int ki = 0; ki < ksize; ki++) {
-					for (int kj = 0; kj < ksize; kj++) {
-						cmax =
-						    fmax(cmax,
-							 x[x_idx + ki * width +
-							   kj]);
-					}
-				}
-				x[xout_idx + i * out_width + j] = cmax;
-			}
-		}
-	}
+    int out_height = (height + 2 * pad - ksize) / stride + 1;
+    int out_width = (width + 2 * pad - ksize) / stride + 1;
+
+    for (int c = 0; c < nchannels; c++) {
+        int xout_idx = c * out_height * out_width; // start index for xout
+        for (int i = 0; i < out_height; i++) {
+            for (int j = 0; j < out_width; j++) {
+                float cmax = 0;
+                for (int ki = 0; ki < ksize; ki++) {
+                    for (int kj = 0; kj < ksize; kj++) {
+                        int input_row = i * stride + ki - pad;
+                        int input_col = j * stride + kj - pad;
+                        if (input_row >= 0 && input_row < height && input_col >= 0 && input_col < width) {
+                            cmax = fmax(cmax, x[c * height * width + input_row * width + input_col]);
+                        }
+                    }
+                }
+                xout[xout_idx + i * out_width + j] = cmax;
+            }
+        }
+    }
 }
 
 static void normalize(float *xout, uint8_t * image)
@@ -503,14 +504,14 @@ static void forward(Model * m, uint8_t * image)
 	quantize2d(&xq, x, cl[0].ksize * cl[0].ksize * cl[0].ic, 28 * 28, cl[0].gs_weight);
 	matmul_conv_with_relu(x, &xq, p + cl[0].qoffset, sf + cl[0].soffset, cl[0].oc,
 			      cl[0].ic * cl[0].ksize * cl[0].ksize, 28 * 28, cl[0].gs_weight, cl[0].gs_bias);
-	maxpool(x, 28, 28, cl[0].oc, 2);
-	im2col_cpu(x2, x, cl[1].ic, 14, 14, cl[1].ksize, cl[1].stride,
+	maxpool(x2, x, 28, 28, cl[0].oc, 2, 2, 0);
+	im2col_cpu(x, x2, cl[1].ic, 14, 14, cl[1].ksize, cl[1].stride,
 		   cl[1].pad);
-	quantize2d(&xq, x2, cl[1].ksize * cl[1].ksize * cl[1].ic, 14 * 14, cl[1].gs_weight);
+	quantize2d(&xq, x, cl[1].ksize * cl[1].ksize * cl[1].ic, 14 * 14, cl[1].gs_weight);
 	matmul_conv_with_relu(x, &xq, p + cl[1].qoffset, sf + cl[1].soffset, cl[1].oc,
 			      cl[1].ic * cl[1].ksize * cl[1].ksize, 14 * 14, cl[1].gs_weight, cl[1].gs_bias);
-	maxpool(x, 14, 14, cl[1].oc, 2);
-	quantize(&xq, x, 7 * 7 * cl[1].oc, ll[0].gs_weight);
+	maxpool(x2, x, 14, 14, cl[1].oc, 2, 2, 0);
+	quantize(&xq, x2, 7 * 7 * cl[1].oc, ll[0].gs_weight);
 	linear_with_relu(x, &xq, p + ll[0].qoffset, sf + ll[0].soffset, ll[0].in, ll[0].out, ll[0].gs_weight, ll[0].gs_bias);
 	quantize(&xq, x, ll[0].out, ll[1].gs_weight);
 	linear(x, &xq, p + ll[1].qoffset, sf + ll[1].soffset, ll[1].in, ll[1].out, ll[1].gs_weight, ll[1].gs_bias);
