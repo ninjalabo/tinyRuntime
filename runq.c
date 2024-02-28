@@ -15,35 +15,51 @@
 
 #define IMAGE_SZ (28*28)
 
-static int GS;			// group size global for quantization of the weights
-
 typedef struct {
 	int8_t *q;		// quantized values
 	float *s;		// scaling factors
 } QuantizedTensor;
 
 typedef struct {
-	int dim;		// model dimension
-	int nclass;		// the number of classes
-} Config;
+	int nclasses;		// the number of classes
+	int nconv;		// the number of convolutional layers
+	int nlinear;		// the number of linear layers
+	int nparameters;		// the number of parameters
+} ModelConfig;
 
 typedef struct {
-	QuantizedTensor *wi;	// input layer weights (dim, IMAGE_SZ)
-	QuantizedTensor *wh;	// hidden layer weights (dim/2, dim)
-	QuantizedTensor *wo;	// output layer weights (nclass, dim/2)
-	QuantizedTensor *bi;	// input layer bias (dim,)
-	QuantizedTensor *bh;	// hidden layer bias (dim/2,)
-	QuantizedTensor *bo;	// output layer bias (nclass,)
-} Weights;
+	int in;			// input dimension
+	int out;		// output dimension
+	int qoffset;		// offset for quantized parameters
+	int soffset;		// offset for scaling factors
+	int gs_weight;		// group size of weights
+	int gs_bias;		// group size of biases
+} LinearConfig;
+
+typedef struct {
+	int ksize;		// kernel size
+	int stride;
+	int pad;		// padding
+	int ic;			// input channels
+	int oc;			// output channels
+	int qoffset;		// offset for quantized parameters
+	int soffset;		// offset for scaling factors
+	int gs_weight;		// group size of weights
+	int gs_bias;		// group size of biases
+} ConvConfig;
 
 typedef struct {
 	float *x;		// buffer to store the output of a layer (IMAGE_SZ,)
+	float *x2;
 	QuantizedTensor xq;	// buffer for quantized arrays
 } Runstate;
 
 typedef struct {
-	Config config;		// the hyperparameters of the architecture (the blueprint)
-	Weights weights;	// the weights of the model
+	ModelConfig model_config;
+	LinearConfig *linear_config;	// linear layers' config
+	ConvConfig *conv_config;	// convolutional layers' config
+	int8_t *parameters;	// array of all weigths and biases
+	float *scaling_factors; // array of all scaling factors
 	Runstate state;		// the current state in the forward pass
 	int fd;			// file descriptor for memory mapping
 	float *data;		// memory mapped data pointer
@@ -52,98 +68,40 @@ typedef struct {
 
 static void malloc_run_state(Runstate *s)
 {
-	int inp_dim = IMAGE_SZ;
-	s->x = calloc(inp_dim, sizeof(float));
+	s->x = calloc(9 * 28 * 28, sizeof(float));
+	s->x2 = calloc(9 * 28 * 28, sizeof(float));
 	s->xq = (QuantizedTensor) {
-	.q = calloc(inp_dim, sizeof(int8_t)),.s =
-		    calloc(inp_dim / GS + 1, sizeof(float))};
+	.q = calloc(9 * 28 * 28, sizeof(int8_t)),.s =
+		    calloc(9 * 28 * 28 / 9, sizeof(float))};
 }
 
 static void free_run_state(Runstate *s)
 {
 	free(s->x);
+	free(s->x2);
 	free(s->xq.q);
 	free(s->xq.s);
 }
 
-static void quantize(QuantizedTensor *qx, float *x, int n)
+static void read_checkpoint(char *path, ModelConfig * config, ConvConfig ** cl,
+		     LinearConfig ** ll, int8_t **parameters, float **scaling_factors,
+			 int *fd, float **data, size_t *file_size)
 {
-	int num_groups = n / GS;
-	float Q_MAX = 127.0f;
-
-	for (int group = 0; group < num_groups; group++) {
-		// find the max absolute value in the current group
-		float wmax = 0.0;
-		for (int i = 0; i < GS; i++) {
-			float val = fabs(x[group * GS + i]);
-			if (val > wmax) {
-				wmax = val;
-			}
-		}
-		// calculate and write the scaling factor
-		float scale = wmax / Q_MAX;
-		qx->s[group] = scale;
-
-		// calculate and write the quantized values
-		for (int i = 0; i < GS; i++) {
-			float quant_value = x[group * GS + i] / scale;	// scale
-			int8_t quantized = (int8_t) round(quant_value);	// round and clamp
-			qx->q[group * GS + i] = quantized;
-		}
-	}
-}
-
-static QuantizedTensor *init_quantized_tensors(void **ptr, int n, int size_each)
-{
-	void *p = *ptr;
-	QuantizedTensor *res = malloc(n * sizeof(QuantizedTensor));
-	for (int i = 0; i < n; i++) {
-		/* map quantized int8 values */
-		res[i].q = (int8_t *) p;
-		p = (int8_t *) p + size_each;
-		/* map scale factors */
-		res[i].s = (float *)p;
-		p = (float *)p + size_each / GS;
-	}
-	*ptr = p;		// advance ptr to current position
-	return res;
-}
-
-static void memory_map_weights(Weights *w, Config *c, void *ptr)
-{
-	// maps memory for the weights and bias of each layer
-	int dim = c->dim;
-	int nclass = c->nclass;
-	w->wi = init_quantized_tensors(&ptr, 1, IMAGE_SZ * dim);
-	w->wh = init_quantized_tensors(&ptr, 1, dim / 2 * dim);;
-	w->wo = init_quantized_tensors(&ptr, 1, dim / 2 * nclass);
-	w->bi = init_quantized_tensors(&ptr, 1, dim);
-	w->bh = init_quantized_tensors(&ptr, 1, dim / 2);
-	w->bo = init_quantized_tensors(&ptr, 1, nclass);
-}
-
-static void read_checkpoint(char *path, Config *config, Weights *weigths, int *fd,
-		     float **data, size_t *file_size)
-{
+	// The data inside the file should follow the order: ModelConfig -> ConvConfig -> LinearConfig -> parameters (first CNN parameters then FC parameters)
 	FILE *file = fopen(path, "rb");
 	if (!file) {
 		fprintf(stderr, "Couldn't open file %s\n", path);
 		exit(EXIT_FAILURE);
 	}
 	// read model config
-	if (fread(config, sizeof(Config), 1, file) != 1) {
+	if (fread(config, sizeof(ModelConfig), 1, file) != 1) {
 		exit(EXIT_FAILURE);
 	}
-	int group_size;		// the group size used in quantization
-	if (fread(&group_size, sizeof(int), 1, file) != 1) {
-		exit(EXIT_FAILURE);
-	}
-	GS = group_size;	// set as global, as it will be used in many places
 	// figure out the file size
 	fseek(file, 0, SEEK_END);	// move file pointer to end of file
 	*file_size = ftell(file);	// get the file size, in bytes
 	fclose(file);
-	// memory map the model weights into the data pointer
+	// memory map layers' config
 	*fd = open(path, O_RDONLY);	// open in read only mode
 	if (*fd == -1) {
 		fprintf(stderr, "open failed!\n");
@@ -154,14 +112,24 @@ static void read_checkpoint(char *path, Config *config, Weights *weigths, int *f
 		fprintf(stderr, "mmap failed!\n");
 		exit(EXIT_FAILURE);
 	}
-	void *weights_ptr = *data + (sizeof(Config) + sizeof(int)) / sizeof(float);	// position the pointer to the start of the parameter data
-	memory_map_weights(weigths, config, weights_ptr);
+	*cl = (ConvConfig *) (*data + sizeof(ModelConfig) / sizeof(float));
+	*ll =
+	    (LinearConfig *) (*data +
+			      (config->nconv * sizeof(ConvConfig) +
+			       sizeof(ModelConfig)) / sizeof(float));
+	// memory map weights and biases
+	int header_size =
+	    sizeof(ModelConfig) + config->nconv * sizeof(ConvConfig) +
+	    config->nlinear * sizeof(LinearConfig);
+	*parameters = (int8_t *) *data + header_size;	// position the parameters pointer to the start of the parameter data
+	*scaling_factors = (float*) (*parameters + config->nparameters);
 }
 
 static void build_model(Model * m, char *checkpoint_path)
 {
 	// read in the Config and the Weights from the checkpoint
-	read_checkpoint(checkpoint_path, &m->config, &m->weights, &m->fd,
+	read_checkpoint(checkpoint_path, &m->model_config, &m->conv_config,
+			&m->linear_config, &m->parameters, &m->scaling_factors, &m->fd,
 			&m->data, &m->file_size);
 	// allocate the RunState buffers
 	malloc_run_state(&m->state);
@@ -169,13 +137,6 @@ static void build_model(Model * m, char *checkpoint_path)
 
 static void free_model(Model *m)
 {
-	// free QuantizedTensors
-	free(m->weights.wi);
-	free(m->weights.wh);
-	free(m->weights.wo);
-	free(m->weights.bi);
-	free(m->weights.bh);
-	free(m->weights.bo);
 	// close the memory mapping
 	if (m->data != MAP_FAILED) {
 		munmap(m->data, m->file_size);
@@ -187,55 +148,262 @@ static void free_model(Model *m)
 	free_run_state(&m->state);
 }
 
-static void linear(float *xout, QuantizedTensor *x, QuantizedTensor *w,
-	    QuantizedTensor *b, int n, int d)
+static void quantize(QuantizedTensor *qx, float *x, int n, int gs)
 {
-	// linear layer: w(d,n) @ x (n,) + b(d,) -> xout (d,)
-	// by far the most amount of time is spent inside this little function
-	int i;
-	//#pragma omp parallel for private(i)
-	for (i = 0; i < d; i++) {
-		float val = 0.0f;
-		int32_t ival = 0;
-		int in = i * n;
-		// do the matmul in groups of GS
-		for (int j = 0; j < n; j += GS) {
-			for (int k = 0; k < GS; k++) {
-				ival +=
-				    ((int32_t) x->q[j + k]) *
-				    ((int32_t) w->q[in + j + k]);
+	int num_groups = n / gs;
+	float Q_MAX = 127.0f;
+
+	for (int group = 0; group < num_groups; group++) {
+		// find the max absolute value in the current group
+		float wmax = 0.0;
+		for (int i = 0; i < gs; i++) {
+			float val = fabs(x[group * gs + i]);
+			if (val > wmax) {
+				wmax = val;
 			}
-			val +=
-			    ((float)ival) * w->s[(in + j) / GS] * x->s[j / GS];
-			ival = 0;
 		}
-		xout[i] = val + ((float)b->q[i]) * b->s[i / GS];
+		// calculate and write the scaling factor
+		float scale = wmax / Q_MAX;
+		qx->s[group] = scale;
+
+		// calculate and write the quantized values
+		for (int i = 0; i < gs; i++) {
+			float quant_value = x[group * gs + i] / scale;	// scale
+			int8_t quantized = (int8_t) round(quant_value);	// round and clamp
+			qx->q[group * gs + i] = quantized;
+		}
 	}
 }
 
-static void linear_with_relu(float *xout, QuantizedTensor *x, QuantizedTensor *w,
-		      QuantizedTensor *b, int n, int d)
+static void quantize2d(QuantizedTensor *qx, float *x, int height, int width, int gs)
 {
-	// linear layer with ReLU activation: w(d,n) @ x (n,) + b(d,) -> xout (d,)
+	// quantize each column in 2d tensor with a specified group size
+	int num_groups = height / gs;
+	float Q_MAX = 127.0f;
+
+	for (int col = 0; col < width; col++) {
+		for (int group = 0; group < num_groups; group++) {
+			// find the max absolute value in the current group
+			float wmax = 0.0;
+			for (int i = 0; i < gs; i++) {
+				float val = fabs(x[(group * gs + i) * width + col]);
+				if (val > wmax) {
+					wmax = val;
+				}
+			}
+			// calculate and write the scaling factor
+			float scale = wmax / Q_MAX;
+			qx->s[col * num_groups + group] = scale;
+
+			// calculate and write the quantized values
+			for (int i = 0; i < gs; i++) {
+				float quant_value = x[(group * gs + i) * width + col] / scale;	// scale
+				int8_t quantized = (int8_t) round(quant_value);	// round and clamp
+				qx->q[(group * gs + i) * width + col] = quantized;
+			}
+		}
+	}
+}
+
+static void linear(float *xout, QuantizedTensor *x, int8_t *p,
+			float *s, int in, int out, int gs_w, int gs_b)
+{
+	// linear layer: w(out,in) @ x (in,) + b(out,) -> xout (out,)
 	// by far the most amount of time is spent inside this little function
 	int i;
+	int8_t *w = p;
+	int8_t *b = p + in * out;
+	float *sw = s;
+	float *sb = s + in * out / gs_w;
 	//#pragma omp parallel for private(i)
-	for (i = 0; i < d; i++) {
+	for (i = 0; i < out; i++) {
 		float val = 0.0f;
 		int32_t ival = 0;
-		int in = i * n;
-		// do the matmul in groups of GS
-		for (int j = 0; j < n; j += GS) {
-			for (int k = 0; k < GS; k++) {
+		// do the matmul in groups of gs_w
+		for (int j = 0; j < in; j += gs_w) {
+			for (int k = 0; k < gs_w; k++) {
 				ival +=
 				    ((int32_t) x->q[j + k]) *
-				    ((int32_t) w->q[in + j + k]);
+				    ((int32_t) w[i * in + j + k]);
 			}
 			val +=
-			    ((float)ival) * w->s[(in + j) / GS] * x->s[j / GS];
+			    ((float)ival) * sw[(i * in + j) / gs_w] * x->s[j / gs_w];
 			ival = 0;
 		}
-		xout[i] = fmax(0.0f, val + ((float)b->q[i]) * b->s[i / GS]);
+		xout[i] = val + ((float)b[i]) * sb[i / gs_b];
+	}
+}
+
+static void linear_with_relu(float *xout, QuantizedTensor *x, int8_t *p,
+				float *s, int in, int out, int gs_w, int gs_b)
+{
+	// linear layer with ReLU activation: w(out,in) @ x (in,) + b(out,) -> xout (out,)
+	int i;
+	int8_t *w = p;
+	int8_t *b = p + in * out;
+	float *sw = s;
+	float *sb = s + in * out / gs_w;
+	//#pragma omp parallel for private(i)
+	for (i = 0; i < out; i++) {
+		float val = 0.0f;
+		int32_t ival = 0;
+		// do the matmul in groups of gs_w
+		for (int j = 0; j < in; j += gs_w) {
+			for (int k = 0; k < gs_w; k++) {
+				ival +=
+				    ((int32_t) x->q[j + k]) *
+				    ((int32_t) w[i * in + j + k]);
+			}
+			val +=
+			    ((float)ival) * sw[(i * in + j) / gs_w] * x->s[j / gs_w];
+			ival = 0;
+		}
+		xout[i] = fmax(0, val + ((float)b[i]) * sb[i / gs_b]);
+	}
+}
+
+// `linear`, `linear_with_relu` and this function works only if gs <= in and in % gs = 0
+static void matmul_conv_with_relu(float *xout, QuantizedTensor *x, int8_t *p,
+				float *s, int nchannels, int in, int out, int gs_w, int gs_b)
+{
+	// w (nchannels,1,in) @ x (1,in,out) + b(chan,) -> xout (nchannels,out)
+	int c;
+	int8_t *w = p;
+	int8_t *b = p + nchannels * in;
+	float *sw = s;
+	float *sb = s + nchannels * in / gs_w;
+	//#pragma omp parallel for private(c)
+	for (c = 0; c < nchannels; c++) {
+		for (int i = 0; i < out; i++) {
+			float val = 0.0f;
+			int32_t ival = 0;
+			// do the matmul in groups of gs_w
+			for (int j = 0; j < in; j += gs_w) {
+				for (int k = 0; k < gs_w; k++) {
+					ival += ((int32_t) x->q[(j + k) * out + i]) *
+					((int32_t) w[c * in + (j + k)]);
+				}
+				val += (float) ival * x->s[(i * in + j) / gs_w] * sw[(c * in + j) / gs_w];
+			}
+			xout[c * out + i] = fmax(0, val + ((float)b[c]) * sb[c / gs_b]);
+		}
+	}
+}
+
+static float im2col_get_pixel(float *im, int height, int width, int row, int col,
+		       int channel, int pad)
+{
+	row -= pad;
+	col -= pad;
+	if (row < 0 || col < 0 || row >= height || col >= width)
+		return 0;
+	return im[col + width * (row + height * channel)];
+}
+
+static void im2col_cpu(float *col, float *im, int nchannels, int height, int width,
+		int ksize, int stride, int pad)
+{
+	// im (nchannels, height, width) -> col (col_size, out_height * out_width)
+	int c, h, w;
+	int out_height = (height + 2 * pad - ksize) / stride + 1;
+	int out_width = (width + 2 * pad - ksize) / stride + 1;
+
+	int col_size = nchannels * ksize * ksize;
+	for (c = 0; c < col_size; c++) {
+		int w_offset = c % ksize;
+		int h_offset = (c / ksize) % ksize;
+		int channel = c / ksize / ksize;
+		for (h = 0; h < out_height; h++) {
+			for (w = 0; w < out_width; w++) {
+				int input_row = h_offset + h * stride;
+				int input_col = w_offset + w * stride;
+				int col_index =
+				    (c * out_height + h) * out_width + w;
+				col[col_index] =
+				    im2col_get_pixel(im, height, width,
+						     input_row, input_col,
+						     channel, pad);
+			}
+		}
+	}
+}
+
+// slightly slower than im2col + quantize2d but uses less memory as model.state.x2 is unnecessary when using this function.
+// static void im2col_quantize(QuantizedTensor *col, float *im, int nchannels, int height, int width,
+// 		int ksize, int stride, int pad, int gs)
+// {
+// 	// perform im2col operation and quantization
+// 	// im (nchannels, height, width) -> col (col_size, out_height * out_width)
+// 	int i, h, w;
+// 	int out_height = (height + 2 * pad - ksize) / stride + 1;
+// 	int out_width = (width + 2 * pad - ksize) / stride + 1;
+
+// 	int col_size = nchannels * ksize * ksize;
+// 	int num_groups = col_size / gs;
+// 	float Q_MAX = 127.0f;
+// 	for (h = 0; h < out_height; h++) {
+// 		for (w = 0; w < out_width; w++) {
+// 			for (int group = 0; group < num_groups; group++) {
+// 				float wmax = 0.0;
+// 				for (i = 0; i < gs; i ++) {
+// 					int c = group * gs + i;
+// 					int w_offset = c % ksize;
+// 					int h_offset = (c / ksize) % ksize;
+// 					int channel = c / ksize / ksize;
+// 					int input_row = h_offset + h * stride;
+// 					int input_col = w_offset + w * stride;
+
+// 					float val = fabs(im2col_get_pixel(im, height, width,
+// 							input_row, input_col, channel, pad));
+// 					if (val > wmax) {
+// 						wmax = val;
+// 					}
+// 				}
+// 				// calculate and write the scaling factor
+// 				float scale = wmax / Q_MAX;
+// 				col->s[(h * out_width + w) * num_groups + group] = scale;
+
+// 				// calculate and write the quantized values
+// 				for (int i = 0; i < gs; i++) {
+// 					int c = group * gs + i;
+// 					int w_offset = c % ksize;
+// 					int h_offset = (c / ksize) % ksize;
+// 					int channel = c / ksize / ksize;
+// 					int input_row = h_offset + h * stride;
+// 					int input_col = w_offset + w * stride;
+// 					int col_index =
+// 						(c * out_height + h) * out_width + w;
+// 					float quant_value = im2col_get_pixel(im, height, width,
+// 							input_row, input_col, channel, pad) / scale;	// scale
+// 					int8_t quantized = (int8_t) round(quant_value);	// round and clamp
+// 					col->q[col_index] = quantized;
+// 				}
+// 			}
+// 		}
+// 	}
+// }
+
+static void maxpool(float *x, int height, int width, int nchannels, int ksize)
+{
+	int out_height = height / ksize;
+	int out_width = width / ksize;
+	for (int c = 0; c < nchannels; c++) {
+		int xout_idx = c * out_height * out_width;	// start index for x
+		for (int i = 0; i < out_height; i++) {
+			for (int j = 0; j < out_width; j++) {
+				float cmax = 0;
+				int x_idx = c * height * width + 2 * (i * width + j);	// start index for x
+				for (int ki = 0; ki < ksize; ki++) {
+					for (int kj = 0; kj < ksize; kj++) {
+						cmax =
+						    fmax(cmax,
+							 x[x_idx + ki * width +
+							   kj]);
+					}
+				}
+				x[xout_idx + i * out_width + j] = cmax;
+			}
+		}
 	}
 }
 
@@ -289,30 +457,64 @@ static void read_mnist_image(char *path, uint8_t * image)
 // e.g., it can be used to evaluate values after a specific layer.
 static void write_tensor(float *x, int size)
 {
-	FILE *f = fopen("actc.txt", "w");
+	FILE *f = fopen("tensor.txt", "w");
 	for (int i = 0; i < size; i++)
 		fprintf(f, "%f\n", x[i]);
 	fclose(f);
+}
+
+static void write_qtensor(int8_t *x, int size)
+{
+	FILE *f = fopen("tensorq.txt", "w");
+	for (int i = 0; i < size; i++)
+		fprintf(f, "%d\n", x[i]);
+	fclose(f);
+}
+
+static void dequantize(QuantizedTensor *qx, float* x, int n, int gs) {
+    for (int i = 0; i < n; i++) {
+        x[i] = qx->q[i] * qx->s[i / gs];
+    }
+}
+
+static void dequantize2d(QuantizedTensor *qx, float* x, int nrows, int ncols, int gs) {
+    for (int i = 0; i < nrows; i++) {
+		for (int j = 0; j < ncols; j++) {
+				x[i * ncols + j] = qx->q[i * ncols + j] * qx->s[(j * nrows + i) / gs];
+		}
+    }
 }
 #endif
 
 static void forward(Model * m, uint8_t * image)
 {
-	Weights *w = &m->weights;
-	int dim = m->config.dim;
-	int nclass = m->config.nclass;
+	ConvConfig *cl = m->conv_config;
+	LinearConfig *ll = m->linear_config;
+	int8_t *p = m->parameters;
+	float *sf = m->scaling_factors;
 	Runstate *s = &m->state;
 	float *x = s->x;
+	float *x2 = s->x2;
 	QuantizedTensor xq = s->xq;
 
-	normalize(x, image);
-	quantize(&xq, x, IMAGE_SZ);
-	linear_with_relu(x, &xq, w->wi, w->bi, IMAGE_SZ, dim);
-	quantize(&xq, x, dim);
-	linear_with_relu(x, &xq, w->wh, w->bh, dim, dim / 2);
-	quantize(&xq, x, dim / 2);
-	linear(x, &xq, w->wo, w->bo, dim / 2, nclass);
-	softmax(x, nclass);
+	normalize(x2, image);
+	im2col_cpu(x, x2, cl[0].ic, 28, 28, cl[0].ksize, cl[0].stride,
+		   cl[0].pad);
+	quantize2d(&xq, x, cl[0].ksize * cl[0].ksize * cl[0].ic, 28 * 28, cl[0].gs_weight);
+	matmul_conv_with_relu(x, &xq, p + cl[0].qoffset, sf + cl[0].soffset, cl[0].oc,
+			      cl[0].ic * cl[0].ksize * cl[0].ksize, 28 * 28, cl[0].gs_weight, cl[0].gs_bias);
+	maxpool(x, 28, 28, cl[0].oc, 2);
+	im2col_cpu(x2, x, cl[1].ic, 14, 14, cl[1].ksize, cl[1].stride,
+		   cl[1].pad);
+	quantize2d(&xq, x2, cl[1].ksize * cl[1].ksize * cl[1].ic, 14 * 14, cl[1].gs_weight);
+	matmul_conv_with_relu(x, &xq, p + cl[1].qoffset, sf + cl[1].soffset, cl[1].oc,
+			      cl[1].ic * cl[1].ksize * cl[1].ksize, 14 * 14, cl[1].gs_weight, cl[1].gs_bias);
+	maxpool(x, 14, 14, cl[1].oc, 2);
+	quantize(&xq, x, 7 * 7 * cl[1].oc, ll[0].gs_weight);
+	linear_with_relu(x, &xq, p + ll[0].qoffset, sf + ll[0].soffset, ll[0].in, ll[0].out, ll[0].gs_weight, ll[0].gs_bias);
+	quantize(&xq, x, ll[0].out, ll[1].gs_weight);
+	linear(x, &xq, p + ll[1].qoffset, sf + ll[1].soffset, ll[1].in, ll[1].out, ll[1].gs_weight, ll[1].gs_bias);
+	softmax(x, ll[1].out);
 }
 
 static void error_usage()
@@ -340,7 +542,7 @@ int main(int argc, char **argv)
 		image_path = argv[i];
 		read_mnist_image(image_path, image);
 		forward(&model, image);	// output (nclass,) is stored in model.state.x2
-		for (int j = 0; j < model.config.nclass; j++) {
+		for (int j = 0; j < model.model_config.nclasses; j++) {
 			printf("%f\t", model.state.x[j]);
 		}
 		printf("\n");
