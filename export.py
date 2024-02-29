@@ -72,7 +72,7 @@ def export_model(model, file_path = "model.bin"):
     for layer in bn_layers:
         f.write(struct.pack("2i", layer.num_features, offset))
         # set offset to the start of next layer
-        offset += layer.num_features*layer.num_features + layer.num_features
+        offset += layer.num_features + layer.num_features
 
     for layer in linear_layers:
         f.write(struct.pack("3i", layer.in_features, layer.out_features, offset))

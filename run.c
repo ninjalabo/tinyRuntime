@@ -15,6 +15,9 @@
 
 #define IMAGE_SZ (28*28)
 
+// avoid division by zero
+#define eps 0.00001f
+
 typedef struct {
     int nclass; // the number of classes
     int n_conv; // the number of convolutional layers
@@ -32,7 +35,7 @@ typedef struct {
 } ConvConfig;
 
 typedef struct {
-	int in;			// input dimension, same as output
+	int ic;			// input channels
 	int offset;		// the position of the layer parameters in the "parameters" array within the "Model" struct
 } BnConfig;
 
@@ -93,10 +96,10 @@ void read_checkpoint(char* path, ModelConfig* config, ConvConfig **convconfig, B
     if (*fd == -1) { fprintf(stderr, "open failed!\n"); exit(EXIT_FAILURE); }
     *data = mmap(NULL, *file_size, PROT_READ, MAP_PRIVATE, *fd, 0);
     if (*data == MAP_FAILED) { fprintf(stderr, "mmap failed!\n"); exit(EXIT_FAILURE); }
-    *convconfig = (ConvConfig*) *data + sizeof(ModelConfig)/sizeof(float);
-    *bnconfig = (BnConfig*) *data + config->n_conv*sizeof(ConvConfig) + sizeof(ModelConfig)/sizeof(float);
-    *linearconfig = (LinearConfig*) *data + config->n_conv*sizeof(ConvConfig) + config->n_bn*sizeof(BnConfig) + sizeof(ModelConfig)/sizeof(float);
-    int header_size = sizeof(ModelConfig) + + config->n_conv * sizeof(ConvConfig) + config->n_bn*sizeof(BnConfig) + config->n_linear * sizeof(LinearConfig);
+    *convconfig = (ConvConfig*) (*data + sizeof(ModelConfig)/sizeof(float));
+    *bnconfig = (BnConfig*) (*data + (config->n_conv*sizeof(ConvConfig) + sizeof(ModelConfig))/sizeof(float));
+    *linearconfig = (LinearConfig*) (*data + (config->n_conv*sizeof(ConvConfig) + config->n_bn*sizeof(BnConfig) + sizeof(ModelConfig))/sizeof(float));
+    int header_size = sizeof(ModelConfig) + config->n_conv * sizeof(ConvConfig) + config->n_bn*sizeof(BnConfig) + config->n_linear * sizeof(LinearConfig);
     *parameters = *data + header_size/sizeof(float); // position the pointer to the start of the parameter data
     
 }
@@ -169,6 +172,51 @@ static void matmul_conv_with_relu(float *xout, float *x, float *p, int nchannels
       }
 		}
 	}
+}
+
+static void matmul_conv(float *xout, float *x, float *p, int nchannels,
+			   int in, int out, bool bias)
+{
+	// w (nchannels,1,in) @ x (1,in,out) + b(chan,) -> xout (nchannels,out)
+	int c;
+	float *w = p;
+	//#pragma omp parallel for private(c)
+	for (c = 0; c < nchannels; c++) {
+		for (int i = 0; i < out; i++) {
+			float val = 0.0f;
+			for (int j = 0; j < in; j++) {
+				val += w[c * in + j] * x[j * out + i];
+			}
+      if (bias) {
+        float *b = p + nchannels * in;
+			  xout[c * out + i] = val + b[c];
+      } else {
+        xout[c * out + i] = val;
+      }
+		}
+	}
+}
+
+static void batchnorm(float *xout, float *x, float *p, int nchannels, int in){
+    // x (nchannels,in) -> xout (nchannels,in)
+    float *w = p;
+    float *b = p + nchannels * in;
+    for (int c = 0; c < nchannels; c++){
+      float mean = 0.0f;
+      float var = 0.0f;
+      for (int i = 0; i < in; i++){
+          mean += x[c * in + i];
+      }
+      mean = mean / in;
+      for (int i = 0; i < in; i++) {
+        var += pow((x[c * in + i] - mean), 2);
+      }
+      var = var / in;
+
+      for (int i = 0; i < in; i++){
+        xout[c * in + i] = (x[c * in + i] + mean)/ sqrt(var + eps) * w[c * in + i] + b[c];
+      }
+    }
 }
 
 static float im2col_get_pixel(float *im, int height, int width, int row, int col,
@@ -289,17 +337,21 @@ void forward(Model* m, uint8_t* image) {
     float *x5 = s->x5;
 
     normalize(x, image);
-    printf("%d", convconfig[0].ic);
+    printf("%d", bnconfig[0].ic);
+    // (64, 1, 5, 5)
     im2col_cpu(x2, x, convconfig[0].ic, 28, 28, convconfig[0].ksize, convconfig[0].stride, convconfig[0].pad);
-	  matmul_conv_with_relu(x2, x, p + convconfig[0].offset, convconfig[0].oc, convconfig[0].ic * convconfig[0].ksize * convconfig[0].ksize, 28 * 28, false);
-
+	  matmul_conv(x2, x, p + convconfig[0].offset, convconfig[0].oc, convconfig[0].ic * convconfig[0].ksize * convconfig[0].ksize, 28 * 28, false);
+    //batchnorm(x2, x2, p + bnconfig[0].offset, bnconfig[0].ic, 28*28);
+    write_tensor(p + bnconfig[3].offset, 64);
+    printf("\n");
+    printf("ok");
 	  maxpool(x2, 28, 28, convconfig[0].oc, 2);
-	  im2col_cpu(x, x2, convconfig[1].ic, 14, 14, convconfig[1].ksize, convconfig[1].stride, convconfig[1].pad);
-	  matmul_conv_with_relu(x2, x, p + convconfig[1].offset, convconfig[1].oc, convconfig[1].ic * convconfig[1].ksize * convconfig[1].ksize, 14 * 14, false);
-	  maxpool(x2, 14, 14, convconfig[1].oc, 2);
+	  // im2col_cpu(x, x2, convconfig[1].ic, 14, 14, convconfig[1].ksize, convconfig[1].stride, convconfig[1].pad);
+	  // matmul_conv_with_relu(x2, x, p + convconfig[1].offset, convconfig[1].oc, convconfig[1].ic * convconfig[1].ksize * convconfig[1].ksize, 14 * 14, false);
+	  // maxpool(x2, 14, 14, convconfig[1].oc, 2);
 
-	  linear_with_relu(x, x2, p + linearconfig[0].offset, linearconfig[0].in, linearconfig[0].out);
-	  linear(x2, x, p + linearconfig[1].offset, linearconfig[1].in, linearconfig[1].out);
+	  // linear_with_relu(x, x2, p + linearconfig[0].offset, linearconfig[0].in, linearconfig[0].out);
+	  // linear(x2, x, p + linearconfig[1].offset, linearconfig[1].in, linearconfig[1].out);
 }
 
 void error_usage() {
@@ -322,10 +374,10 @@ int main(int argc, char** argv) {
         image_path = argv[i];
         read_mnist_image(image_path, image);
         forward(&model, image); // output (nclass,) is stored in model.state.x2
-        for (int j = 0; j < model.model_config.nclass; j++) {
-            printf("%f\t", model.state.x2[j]);
-        }
-        printf("\n");
+        // for (int j = 0; j < model.model_config.nclass; j++) {
+        //     printf("%f\t", model.state.x2[j]);
+        // }
+        // printf("\n");
     }
 
     free(image);
