@@ -276,9 +276,9 @@ static void matmul_conv_with_relu(float *xout, QuantizedTensor *x, int8_t *p,
 	for (c = 0; c < nchannels; c++) {
 		for (int i = 0; i < out; i++) {
 			float val = 0.0f;
-			int32_t ival = 0;
 			// do the matmul in groups of gs_w
 			for (int j = 0; j < in; j += gs_w) {
+				int32_t ival = 0;
 				for (int k = 0; k < gs_w; k++) {
 					ival += ((int32_t) x->q[(j + k) * out + i]) *
 					((int32_t) w[c * in + (j + k)]);

@@ -48,7 +48,7 @@ def test_runfiles():
     # retrieve reference values using Python model
     model = torch.load("model.pt")
     with open(file_path, "rb") as f:
-        image = torch.tensor(struct.unpack('B'*(28*28), f.read(28*28))).view(1,28,28)
+        image = torch.tensor(struct.unpack('B'*(28*28), f.read(28*28))).view(1,1,28,28)
         image = ((image/255 - 0.5) / 0.5)
         ref = model(image).detach()
         ref = torch.nn.functional.softmax(ref, dim=1).view(-1).numpy() # python model output
@@ -56,4 +56,3 @@ def test_runfiles():
     assert np.allclose(res, ref, atol=1e-5, rtol=0), "run.c: Probabilities are not close."
     assert np.allclose(res1, ref, atol=1e-5, rtol=0), "runq.c (group size = 1): Probabilities are not close."
     assert np.allclose(res2, ref, atol=1e-2, rtol=0), "runq.c (group size = 2):Probabilities are not close."
-
