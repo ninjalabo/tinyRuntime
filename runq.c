@@ -66,13 +66,23 @@ typedef struct {
 	size_t file_size;	// size of the checkpoint file in bytes
 } Model;
 
-static void malloc_run_state(Runstate *s)
+static void malloc_run_state(Runstate *s, ModelConfig config, ConvConfig * cl,
+		     LinearConfig * ll)
 {
+	int gs_min = INFINITY;
+	// find the minimum group size of weights
+	for (int i = 0; i < config.nconv; i++) {
+		gs_min = cl[i].gs_weight < gs_min ? cl[i].gs_weight : gs_min;
+	}
+	for (int i = 0; i < config.nlinear; i++) {
+		gs_min = ll[i].gs_weight < gs_min ? ll[i].gs_weight : gs_min;
+	}
+
 	s->x = calloc(9 * 28 * 28, sizeof(float));
-	s->x2 = calloc(9 * 28 * 28, sizeof(float));
+	s->x2 = calloc(4 * 28 * 28, sizeof(float));
 	s->xq = (QuantizedTensor) {
 	.q = calloc(9 * 28 * 28, sizeof(int8_t)),.s =
-		    calloc(9 * 28 * 28 / 9, sizeof(float))};
+		    calloc(9 * 28 * 28 / gs_min + 1, sizeof(float))};
 }
 
 static void free_run_state(Runstate *s)
@@ -132,7 +142,7 @@ static void build_model(Model * m, char *checkpoint_path)
 			&m->linear_config, &m->parameters, &m->scaling_factors, &m->fd,
 			&m->data, &m->file_size);
 	// allocate the RunState buffers
-	malloc_run_state(&m->state);
+	malloc_run_state(&m->state, m->model_config, m->conv_config, m->linear_config);
 }
 
 static void free_model(Model *m)

@@ -54,8 +54,8 @@ typedef struct {
 
 static void malloc_run_state(Runstate * s)
 {
-	s->x = calloc(9 * 28 * 28, sizeof(float));
-	s->x2 = calloc(4 * 28 * 28, sizeof(float));
+	s->x = calloc(9 * 4 * 14 * 14, sizeof(float));
+	s->x2 = calloc(9 * 28 * 28, sizeof(float));
 }
 
 static void free_run_state(Runstate * s)
