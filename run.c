@@ -11,69 +11,79 @@
 #include <stdint.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <stdbool.h>
 
 #define IMAGE_SZ (28*28)
 
 typedef struct {
-    int dim; // model dimension
     int nclass; // the number of classes
-} Config;
+    int n_conv; // the number of convolutional layers
+    int n_bn; // the number of batchnorm layers
+    int n_linear; // the number of linear layers
+} ModelConfig;
 
 typedef struct {
-    float* wi; // input layer weights (dim, IMAGE_SZ)
-    float* wh; // hidden layer weights (dim/2, dim)
-    float* wo; // output layer weights (nclass, dim/2)
-    float* bi; // input layer bias (dim,)
-    float* bh; // hidden layer bias (dim/2,)
-    float* bo; // output layer bias (nclass,)
-} Weights;
+	int ksize;		// kernel size
+	int stride;
+	int pad;		// padding
+	int ic;			// input channels
+	int oc;			// output channels
+	int offset;		// the position of the layer parameters in the "parameters" array within the "Model" struct
+} ConvConfig;
 
 typedef struct {
-    float* x; // buffer to store the output of a layer (IMAGE_SZ,)
-    float* x2; // buffer to store the output of a layer (dim,)
+	int in;			// input dimension, same as output
+	int offset;		// the position of the layer parameters in the "parameters" array within the "Model" struct
+} BnConfig;
+
+typedef struct {
+	int in;			// input dimension
+	int out;		// output dimension
+	int offset;		// the position of the layer parameters in the "parameters" array within the "Model" struct
+} LinearConfig;
+
+typedef struct {
+    float* x; // buffer to store the input (28*28,)
+    float* x2; // buffer to store the output of a layer (25*28*28,)
+    float* x3; // buffer to store the output of a layer (9*28*28,)
+    float* x4; // buffer to store the output of a layer (9*14*14,)
+    float* x5; // buffer to store the output of a layer (9*7*7,)
 } Runstate;
 
 typedef struct {
-    Config config; // the hyperparameters of the architecture (the blueprint)
-    Weights weights; // the weights of the model
-    Runstate state; // the current state in the forward pass
-    int fd; // file descriptor for memory mapping
-    float* data; // memory mapped data pointer
-    size_t file_size; // size of the checkpoint file in bytes
+	ModelConfig model_config;
+	LinearConfig *linear_config;	// linear layers' config
+	ConvConfig *conv_config;	// convolutional layers' config
+  BnConfig *bn_config;	// linear layers' config
+	float *parameters;	// array of all weigths and biases
+	Runstate state;		// the current state in the forward pass
+	int fd;			// file descriptor for memory mapping
+	float *data;		// memory mapped data pointer
+	size_t file_size;	// size of the checkpoint file in bytes
 } Model;
 
-void malloc_run_state(Runstate* s, int dim) {
-    s->x = calloc(IMAGE_SZ, sizeof(float));
-    s->x2 = calloc(dim, sizeof(float));
+void malloc_run_state(Runstate* s) {
+    s->x = calloc(28*28, sizeof(float));
+    s->x2 = calloc(25*28*28, sizeof(float));
+    s->x3 = calloc(9*28*28, sizeof(float));
+    s->x4 = calloc(9*14*14, sizeof(float));
+    s->x5 = calloc(9*7*7, sizeof(float));
 }
 
 void free_run_state(Runstate* s) {
     free(s->x);
     free(s->x2);
+    free(s->x3);
+    free(s->x4);
+    free(s->x5);
 }
 
-void memory_map_weights(Weights* w, Config* c, float* ptr) {
-    // maps memory for the weights and bias of each layer
-    int dim = c->dim;
-    int nclass = c->nclass;
-    w->wi = ptr;
-    ptr += IMAGE_SZ * dim;
-    w->wh = ptr;
-    ptr += dim * dim/2;
-    w->wo = ptr;
-    ptr +=  nclass * dim/2;
-    w->bi = ptr;
-    ptr += dim;
-    w->bh = ptr;
-    ptr += dim/2;
-    w->bo = ptr;
-}
-
-void read_checkpoint(char* path, Config* config, Weights* weigths, int* fd, float** data, size_t* file_size) {
+void read_checkpoint(char* path, ModelConfig* config, ConvConfig **convconfig, BnConfig **bnconfig,
+                     LinearConfig **linearconfig, float **parameters, int* fd, float** data, size_t* file_size) {
     FILE *file = fopen(path, "rb");
     if (!file) { fprintf(stderr, "Couldn't open file %s\n", path); exit(EXIT_FAILURE); }
     // read model config
-    if (fread(config, sizeof(Config), 1, file) != 1) { exit(EXIT_FAILURE); }
+    if (fread(config, sizeof(ModelConfig), 1, file) != 1) { exit(EXIT_FAILURE); }
     // figure out the file size
     fseek(file, 0, SEEK_END); // move file pointer to end of file
     *file_size = ftell(file); // get the file size, in bytes
@@ -83,15 +93,19 @@ void read_checkpoint(char* path, Config* config, Weights* weigths, int* fd, floa
     if (*fd == -1) { fprintf(stderr, "open failed!\n"); exit(EXIT_FAILURE); }
     *data = mmap(NULL, *file_size, PROT_READ, MAP_PRIVATE, *fd, 0);
     if (*data == MAP_FAILED) { fprintf(stderr, "mmap failed!\n"); exit(EXIT_FAILURE); }
-    float* weights_ptr = *data + sizeof(Config)/sizeof(float); // position the pointer to the start of the parameter data
-    memory_map_weights(weigths, config, weights_ptr);
+    *convconfig = (ConvConfig*) *data + sizeof(ModelConfig)/sizeof(float);
+    *bnconfig = (BnConfig*) *data + config->n_conv*sizeof(ConvConfig) + sizeof(ModelConfig)/sizeof(float);
+    *linearconfig = (LinearConfig*) *data + config->n_conv*sizeof(ConvConfig) + config->n_bn*sizeof(BnConfig) + sizeof(ModelConfig)/sizeof(float);
+    int header_size = sizeof(ModelConfig) + + config->n_conv * sizeof(ConvConfig) + config->n_bn*sizeof(BnConfig) + config->n_linear * sizeof(LinearConfig);
+    *parameters = *data + header_size/sizeof(float); // position the pointer to the start of the parameter data
+    
 }
 
 void build_model(Model* m, char* checkpoint_path) {
     // read in the Config and the Weights from the checkpoint
-    read_checkpoint(checkpoint_path, &m->config, &m->weights, &m->fd, &m->data, &m->file_size);
+    read_checkpoint(checkpoint_path, &m->model_config, &m->conv_config, &m->bn_config, &m->linear_config, &m->parameters, &m->fd, &m->data, &m->file_size);
     // allocate the RunState buffers
-    malloc_run_state(&m->state, m->config.dim);
+    malloc_run_state(&m->state);
 }
 
 void free_model(Model* m) {
@@ -102,32 +116,123 @@ void free_model(Model* m) {
     free_run_state(&m->state);
 }
 
-void linear(float* xout, float* x, float* w, float* b, int n, int d) {
-    // linear layer: w(d,n) @ x (n,) + b(d,) -> xout (d,)
-    // by far the most amount of time is spent inside this little function
-    int i;
-    #pragma omp parallel for private(i)
-    for (i = 0; i < d; i++) {
-        float val = 0.0f;
-        for (int j = 0; j < n; j++) {
-            val += w[i * n + j] * x[j];
-        }
-        xout[i] = val + b[i];
-    }
+static void linear(float *xout, float *x, float *p, int in, int out)
+{
+	// linear layer: w(out,in) @ x (in,) + b(out,) -> xout (out,)
+	// by far the most amount of time is spent inside this little function
+	int i;
+	float *w = p;
+	float *b = p + in * out;
+	//#pragma omp parallel for private(i)
+	for (i = 0; i < out; i++) {
+		float val = 0.0f;
+		for (int j = 0; j < in; j++) {
+			val += w[i * in + j] * x[j];
+		}
+		xout[i] = val + b[i];
+	}
 }
 
-void linear_with_relu(float* xout, float* x, float* w, float* b, int n, int d) {
-    // linear layer with ReLU activation: w(d,n) @ x (n,) + b(d,) -> xout (d,)
-    int i;
-    #pragma omp parallel for private(i)
-    for (i = 0; i < d; i++) {
-        float val = 0.0f;
-        for (int j = 0; j < n; j++) {
-            val += w[i * n + j] * x[j];
-        }
-        xout[i] = fmax(val + b[i], 0.0f);
-    }
+static void linear_with_relu(float *xout, float *x, float *p, int in, int out)
+{
+	// linear layer with ReLU activation: w(out,in) @ x (in,) + b(out,) -> xout (out,)
+	int i;
+	float *w = p;
+	float *b = p + in * out;
+	//#pragma omp parallel for private(i)
+	for (i = 0; i < out; i++) {
+		float val = 0.0f;
+		for (int j = 0; j < in; j++) {
+			val += w[i * in + j] * x[j];
+		}
+		xout[i] = fmax(val + b[i], 0.0f);
+	}
 }
+static void matmul_conv_with_relu(float *xout, float *x, float *p, int nchannels,
+			   int in, int out, bool bias)
+{
+	// w (nchannels,1,in) @ x (1,in,out) + b(chan,) -> xout (nchannels,out)
+	int c;
+	float *w = p;
+	//#pragma omp parallel for private(c)
+	for (c = 0; c < nchannels; c++) {
+		for (int i = 0; i < out; i++) {
+			float val = 0.0f;
+			for (int j = 0; j < in; j++) {
+				val += w[c * in + j] * x[j * out + i];
+			}
+      if (bias) {
+        float* b = p + nchannels * in;
+			  xout[c * out + i] = fmax(val + b[c], 0.0f);
+      } else {
+        xout[c * out + i] = fmax(val, 0.0f);
+      }
+		}
+	}
+}
+
+static float im2col_get_pixel(float *im, int height, int width, int row, int col,
+		       int channel, int pad)
+{
+	row -= pad;
+	col -= pad;
+	if (row < 0 || col < 0 || row >= height || col >= width)
+		return 0;
+	return im[col + width * (row + height * channel)];
+}
+
+static void im2col_cpu(float *col, float *im, int nchannels, int height, int width,
+		int ksize, int stride, int pad)
+{
+	// im (nchannels, height, width) -> col (col_size, out_height * out_width)
+	int c, h, w;
+	int out_height = (height + 2 * pad - ksize) / stride + 1;
+	int out_width = (width + 2 * pad - ksize) / stride + 1;
+
+	int col_size = nchannels * ksize * ksize;
+	for (c = 0; c < col_size; c++) {
+		int w_offset = c % ksize;
+		int h_offset = (c / ksize) % ksize;
+		int channel = c / ksize / ksize;
+		for (h = 0; h < out_height; h++) {
+			for (w = 0; w < out_width; w++) {
+				int input_row = h_offset + h * stride;
+				int input_col = w_offset + w * stride;
+				int col_index =
+				    (c * out_height + h) * out_width + w;
+				col[col_index] =
+				    im2col_get_pixel(im, height, width,
+						     input_row, input_col,
+						     channel, pad);
+			}
+		}
+	}
+}
+
+static void maxpool(float *x, int height, int width, int nchannels, int ksize)
+{
+	int out_height = height / ksize;
+	int out_width = width / ksize;
+	for (int c = 0; c < nchannels; c++) {
+		int xout_idx = c * out_height * out_width;	// start index for x
+		for (int i = 0; i < out_height; i++) {
+			for (int j = 0; j < out_width; j++) {
+				float cmax = 0;
+				int x_idx = c * height * width + 2 * (i * width + j);	// start index for x
+				for (int ki = 0; ki < ksize; ki++) {
+					for (int kj = 0; kj < ksize; kj++) {
+						cmax =
+						    fmax(cmax,
+							 x[x_idx + ki * width +
+							   kj]);
+					}
+				}
+				x[xout_idx + i * out_width + j] = cmax;
+			}
+		}
+	}
+}
+
 
 void normalize(float* xout, uint8_t* image) {
     // normalize values [0, 255] -> [-1, 1]
@@ -172,18 +277,29 @@ void write_tensor(float* x, int size) {
 }
 
 void forward(Model* m, uint8_t* image) {
-    Weights* w = &m->weights;
-    int dim = m->config.dim;
-    int nclass = m->config.nclass;
-    Runstate* s = &m->state;
-    float *x = s->x;
-    float *x2 = s->x2;
+    ConvConfig *convconfig = m->conv_config;
+    BnConfig *bnconfig = m->bn_config;
+	  LinearConfig *linearconfig = m->linear_config;
+	  float *p = m->parameters;
+	  Runstate *s = &m->state;
+	  float *x = s->x;
+	  float *x2 = s->x2;
+    float *x3 = s->x3;
+    float *x4 = s->x4;
+    float *x5 = s->x5;
 
     normalize(x, image);
-    linear_with_relu(x2, x, w->wi, w->bi, IMAGE_SZ, dim);
-    linear_with_relu(x, x2, w->wh, w->bh, dim, dim/2);
-    linear(x2, x, w->wo, w->bo, dim/2, nclass);
-    softmax(x2, nclass);
+    printf("%d", convconfig[0].ic);
+    im2col_cpu(x2, x, convconfig[0].ic, 28, 28, convconfig[0].ksize, convconfig[0].stride, convconfig[0].pad);
+	  matmul_conv_with_relu(x2, x, p + convconfig[0].offset, convconfig[0].oc, convconfig[0].ic * convconfig[0].ksize * convconfig[0].ksize, 28 * 28, false);
+
+	  maxpool(x2, 28, 28, convconfig[0].oc, 2);
+	  im2col_cpu(x, x2, convconfig[1].ic, 14, 14, convconfig[1].ksize, convconfig[1].stride, convconfig[1].pad);
+	  matmul_conv_with_relu(x2, x, p + convconfig[1].offset, convconfig[1].oc, convconfig[1].ic * convconfig[1].ksize * convconfig[1].ksize, 14 * 14, false);
+	  maxpool(x2, 14, 14, convconfig[1].oc, 2);
+
+	  linear_with_relu(x, x2, p + linearconfig[0].offset, linearconfig[0].in, linearconfig[0].out);
+	  linear(x2, x, p + linearconfig[1].offset, linearconfig[1].in, linearconfig[1].out);
 }
 
 void error_usage() {
@@ -193,7 +309,6 @@ void error_usage() {
 }
 
 int main(int argc, char** argv) {
-
     char* model_path = NULL;
     char* image_path = NULL;
 
@@ -207,7 +322,7 @@ int main(int argc, char** argv) {
         image_path = argv[i];
         read_mnist_image(image_path, image);
         forward(&model, image); // output (nclass,) is stored in model.state.x2
-        for (int j = 0; j < model.config.nclass; j++) {
+        for (int j = 0; j < model.model_config.nclass; j++) {
             printf("%f\t", model.state.x2[j]);
         }
         printf("\n");

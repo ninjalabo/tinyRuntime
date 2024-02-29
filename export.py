@@ -45,23 +45,56 @@ def quantize_q80(w, group_size):
 def export_model(model, file_path = "model.bin"):
     ''' export the model to filepath '''
     f = open(file_path, "wb")
-    # write the model structure 
-    header = struct.pack("ii", model.dim, model.nclass)
-    f.write(header) 
-    # write the model weights and biases
-    weights = [*[layer.weight for layer in model.layers], model.out.weight]
-    bias = [*[layer.bias for layer in model.layers], model.out.bias]
+
+    # write model config
+    conv_layers = [layer for layer in model.modules() if isinstance(layer, torch.nn.Conv2d)]
+    n_conv = len(conv_layers)
+    bn_layers = [layer for layer in model.modules() if isinstance(layer, torch.nn.BatchNorm2d)]
+    n_bn = len(bn_layers)
+    linear_layers = [layer for layer in model.modules() if isinstance(layer, torch.nn.Linear)]
+    nlinear = len(linear_layers)
+    n_classes = 10
+    header = struct.pack("iiii", n_classes, n_conv, n_bn, nlinear)
+    f.write(header)
+    # write layers' config
+    offset = 0 # the number of bytes in float32 (i.e. offset 1 = 4 bytes)
+    for layer in conv_layers:
+        f.write(struct.pack("6i", layer.kernel_size[0], layer.stride[0], layer.padding[0],
+                layer.in_channels, layer.out_channels, offset))
+        # set offset to the start of next layer
+        t_offset =  layer.out_channels*layer.in_channels*layer.kernel_size[0]**2
+        # Check if the layer has a bias term and adjust the offset accordingly
+        if layer.bias is not None:
+            offset += t_offset + layer.out_channels  # Include biases in the offset
+        else:
+            offset += t_offset  # No biases
+
+    for layer in bn_layers:
+        f.write(struct.pack("2i", layer.num_features, offset))
+        # set offset to the start of next layer
+        offset += layer.num_features*layer.num_features + layer.num_features
+
+    for layer in linear_layers:
+        f.write(struct.pack("3i", layer.in_features, layer.out_features, offset))
+        offset += layer.in_features*layer.out_features + layer.out_features
+
+    # write the weights and biases of the model
+    for layer in conv_layers:
+        for p in layer.parameters():
+            serialize_fp32(f, p)
     
-    for w in weights:
-        serialize_fp32(f, w)
-    
-    for b in bias:
-        serialize_fp32(f, b)
+    for layer in bn_layers:
+        for p in layer.parameters():
+            serialize_fp32(f, p)
+
+    for layer in linear_layers:
+        for p in layer.parameters():
+            serialize_fp32(f, p)
 
     f.close()
     print(f"wrote {file_path}")
     
-    torch.save(model, "model.pt") # for loading in python
+    #torch.save(model, "model.pt") # for loading in python
 
 def export_modelq8(model_path="model.pt", file_path="modelq8.bin", gs=64):
     ''' read a model from model.bin if not given and export a quatized (int8) model to filepath '''

@@ -4,11 +4,12 @@ import numpy as np
 import torchvision
 from torchvision import transforms
 import torch
+from torch import nn
 import matplotlib.pyplot as plt
 import struct
 import os
 
-from model import Model # my model
+from model import ResNet # my model
 from export import export_model
 from export import export_modelq8
 
@@ -29,10 +30,10 @@ def test_model(model, testloader):
     with torch.no_grad():
         vloss = 0.
         correct = 0.
-        for X,y in testloader:
-            out = model(X)
-            vloss += loss_fn(out, y).item()
-            correct += (torch.argmax(out, 1)==y).float().sum()
+        for inputs, targets in testloader:
+            out = model(inputs)
+            vloss += loss_fn(out, targets).item()
+            correct += (torch.argmax(out, 1)==targets).float().sum()
     
     return vloss/len(testloader),  correct/len(testloader.dataset)
 
@@ -46,10 +47,10 @@ def train_model(model):
 
         model.train()
         tloss = 0
-        for X,y in trainloader:
+        for inputs, targets in trainloader:
             opt.zero_grad()
-            out = model(X)
-            loss = loss_fn(out, y)
+            out = model(inputs)
+            loss = loss_fn(out, targets)
             loss.backward()
             tloss += loss.item()
             opt.step()
@@ -58,3 +59,4 @@ def train_model(model):
         vloss, correct = test_model(model, testloader)
 
         print('LOSS train {} valid {} accuracy {:.5f}'.format(tloss, vloss, correct))
+    torch.save(model, "model.pt")
