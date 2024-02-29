@@ -257,28 +257,29 @@ static void im2col_cpu(float *col, float *im, int nchannels, int height, int wid
 	}
 }
 
-static void maxpool(float *x, int height, int width, int nchannels, int ksize)
+static void maxpool(float *xout, float *x, int height, int width, int nchannels, int ksize, int stride, int pad)
 {
-	int out_height = height / ksize;
-	int out_width = width / ksize;
-	for (int c = 0; c < nchannels; c++) {
-		int xout_idx = c * out_height * out_width;	// start index for x
-		for (int i = 0; i < out_height; i++) {
-			for (int j = 0; j < out_width; j++) {
-				float cmax = 0;
-				int x_idx = c * height * width + 2 * (i * width + j);	// start index for x
-				for (int ki = 0; ki < ksize; ki++) {
-					for (int kj = 0; kj < ksize; kj++) {
-						cmax =
-						    fmax(cmax,
-							 x[x_idx + ki * width +
-							   kj]);
-					}
-				}
-				x[xout_idx + i * out_width + j] = cmax;
-			}
-		}
-	}
+    int out_height = (height + 2 * pad - ksize) / stride + 1;
+    int out_width = (width + 2 * pad - ksize) / stride + 1;
+
+    for (int c = 0; c < nchannels; c++) {
+        int xout_idx = c * out_height * out_width; // start index for xout
+        for (int i = 0; i < out_height; i++) {
+            for (int j = 0; j < out_width; j++) {
+                float cmax = 0;
+                for (int ki = 0; ki < ksize; ki++) {
+                    for (int kj = 0; kj < ksize; kj++) {
+                        int input_row = i * stride + ki - pad;
+                        int input_col = j * stride + kj - pad;
+                        if (input_row >= 0 && input_row < height && input_col >= 0 && input_col < width) {
+                            cmax = fmax(cmax, x[c * height * width + input_row * width + input_col]);
+                        }
+                    }
+                }
+                xout[xout_idx + i * out_width + j] = cmax;
+            }
+        }
+    }
 }
 
 
