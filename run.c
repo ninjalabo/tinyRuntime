@@ -66,11 +66,11 @@ typedef struct {
 } Model;
 
 void malloc_run_state(Runstate* s) {
-    s->x = calloc(28*28, sizeof(float));
-    s->x2 = calloc(25*28*28, sizeof(float));
-    s->x3 = calloc(9*28*28, sizeof(float));
-    s->x4 = calloc(9*14*14, sizeof(float));
-    s->x5 = calloc(9*7*7, sizeof(float));
+    s->x = calloc(256*28*28, sizeof(float));
+    s->x2 = calloc(256*28*28, sizeof(float));
+    s->x3 = calloc(256*28*28, sizeof(float));
+    s->x4 = calloc(128*14*14, sizeof(float));
+    s->x5 = calloc(256*7*7, sizeof(float));
 }
 
 void free_run_state(Runstate* s) {
@@ -119,24 +119,7 @@ void free_model(Model* m) {
     free_run_state(&m->state);
 }
 
-static void linear(float *xout, float *x, float *p, int in, int out)
-{
-	// linear layer: w(out,in) @ x (in,) + b(out,) -> xout (out,)
-	// by far the most amount of time is spent inside this little function
-	int i;
-	float *w = p;
-	float *b = p + in * out;
-	//#pragma omp parallel for private(i)
-	for (i = 0; i < out; i++) {
-		float val = 0.0f;
-		for (int j = 0; j < in; j++) {
-			val += w[i * in + j] * x[j];
-		}
-		xout[i] = val + b[i];
-	}
-}
-
-static void linear_with_relu(float *xout, float *x, float *p, int in, int out)
+static void linear(float *xout, float *x, float *p, int in, int out, bool relu)
 {
 	// linear layer with ReLU activation: w(out,in) @ x (in,) + b(out,) -> xout (out,)
 	int i;
@@ -148,11 +131,15 @@ static void linear_with_relu(float *xout, float *x, float *p, int in, int out)
 		for (int j = 0; j < in; j++) {
 			val += w[i * in + j] * x[j];
 		}
-		xout[i] = fmax(val + b[i], 0.0f);
+    if (relu) {
+      xout[i] = fmax(val + b[i], 0.0f);
+    } else {
+      xout[i] = val + b[i];
+    }
 	}
 }
 static void matmul_conv_with_relu(float *xout, float *x, float *p, int nchannels,
-			   int in, int out, bool bias)
+			   int in, int out, bool bias, bool relu)
 {
 	// w (nchannels,1,in) @ x (1,in,out) + b(chan,) -> xout (nchannels,out)
 	int c;
@@ -164,6 +151,7 @@ static void matmul_conv_with_relu(float *xout, float *x, float *p, int nchannels
 			for (int j = 0; j < in; j++) {
 				val += w[c * in + j] * x[j * out + i];
 			}
+      // float bias_val = (bias) ? b[c] : 0.0f;
       if (bias) {
         float* b = p + nchannels * in;
 			  xout[c * out + i] = fmax(val + b[c], 0.0f);
@@ -197,24 +185,30 @@ static void matmul_conv(float *xout, float *x, float *p, int nchannels,
 	}
 }
 
-static void batchnorm(float *xout, float *x, float *p, int nchannels, int in){
+static void batchnorm(float *xout, float *x, float *p, int nchannels, int in, bool relu){
     // x (nchannels,in) -> xout (nchannels,in)
     float *w = p;
-    float *b = p + nchannels * in;
+    float *b = p + nchannels;
+    float *running_mean = p + 2 * nchannels;
+    float *running_var = p + 3 * nchannels;
     for (int c = 0; c < nchannels; c++){
-      float mean = 0.0f;
-      float var = 0.0f;
       for (int i = 0; i < in; i++){
-          mean += x[c * in + i];
+        float val = (x[c * in + i] - running_mean[c]) / sqrt(running_var[c] + eps) * w[c] + b[c];
+        xout[c * in + i] = (relu) ? fmax(val, 0.0f) : val;
       }
-      mean = mean / in;
-      for (int i = 0; i < in; i++) {
-        var += pow((x[c * in + i] - mean), 2);
-      }
-      var = var / in;
+    }
+}
 
+static void batchnorm_with_relu(float *xout, float *x, float *p, int nchannels, int in){
+    // x (nchannels,in) -> xout (nchannels,in)
+    float *w = p;
+    float *b = p + nchannels;
+    float *running_mean = p + 2 * nchannels;
+    float *running_var = p + 3 * nchannels;
+    for (int c = 0; c < nchannels; c++){
       for (int i = 0; i < in; i++){
-        xout[c * in + i] = (x[c * in + i] + mean)/ sqrt(var + eps) * w[c * in + i] + b[c];
+        float val = (x[c * in + i] - running_mean[c]) / sqrt(running_var[c] + eps) * w[c] + b[c];
+        xout[c * in + i] = fmax(val, 0.0f);
       }
     }
 }
@@ -257,30 +251,73 @@ static void im2col_cpu(float *col, float *im, int nchannels, int height, int wid
 	}
 }
 
-static void maxpool(float *x, int height, int width, int nchannels, int ksize)
+static void maxpool(float *xout, float *x, int height, int width, int nchannels, int ksize, int stride, int pad)
 {
-	int out_height = height / ksize;
-	int out_width = width / ksize;
-	for (int c = 0; c < nchannels; c++) {
-		int xout_idx = c * out_height * out_width;	// start index for x
-		for (int i = 0; i < out_height; i++) {
-			for (int j = 0; j < out_width; j++) {
-				float cmax = 0;
-				int x_idx = c * height * width + 2 * (i * width + j);	// start index for x
-				for (int ki = 0; ki < ksize; ki++) {
-					for (int kj = 0; kj < ksize; kj++) {
-						cmax =
-						    fmax(cmax,
-							 x[x_idx + ki * width +
-							   kj]);
-					}
-				}
-				x[xout_idx + i * out_width + j] = cmax;
-			}
-		}
-	}
+    int out_height = (height + 2 * pad - ksize) / stride + 1;
+    int out_width = (width + 2 * pad - ksize) / stride + 1;
+
+    for (int c = 0; c < nchannels; c++) {
+        int xout_idx = c * out_height * out_width; // start index for xout
+        for (int i = 0; i < out_height; i++) {
+            for (int j = 0; j < out_width; j++) {
+                float cmax = 0;
+                for (int ki = 0; ki < ksize; ki++) {
+                    for (int kj = 0; kj < ksize; kj++) {
+                        int input_row = i * stride + ki - pad;
+                        int input_col = j * stride + kj - pad;
+                        if (input_row >= 0 && input_row < height && input_col >= 0 && input_col < width) {
+                            cmax = fmax(cmax, x[c * height * width + input_row * width + input_col]);
+                        }
+                    }
+                }
+                xout[xout_idx + i * out_width + j] = cmax;
+            }
+        }
+    }
 }
 
+static void avgpool(float *xout, float *x, int height, int width, int nchannels, int ksize, int stride, int pad){
+  int out_height = (height + 2 * pad - ksize) / stride + 1;
+  int out_width = (width + 2 * pad - ksize) / stride + 1;
+  
+  for (int c = 0; c < nchannels; c++) {
+        int xout_idx = c * out_height * out_width; // start index for xout
+        for (int i = 0; i < out_height; i++) {
+            for (int j = 0; j < out_width; j++) {
+              float sum = 0.0f;
+              for (int ki = 0; ki < ksize; ki++) {
+                    for (int kj = 0; kj < ksize; kj++) {
+                        int input_row = i * stride + ki - pad;
+                        int input_col = j * stride + kj - pad;
+                        if (input_row >= 0 && input_row < height && input_col >= 0 && input_col < width) {
+                            sum += x[c * height * width + input_row * width + input_col];
+                        }
+                    }
+                }
+                xout[xout_idx + i * out_width + j] = sum;
+            }
+        }
+  }
+}
+
+void matadd(float* x, float* y, int size){
+    for (int i = 0; i < size; i++){
+        x[i] = x[i] + y[i];
+    }
+}
+
+void relu(float* x, int size) {
+    // apply ReLU (Rectified Linear Unit) activation 
+    for (int i = 0; i < size; i++){
+        x[i] = fmax(0.0f, x[i]);
+    }
+}
+
+void matcopy(float* x, float* y, int size) {
+    for (int i = 0; i < size; i++){
+        x[i] = y[i];
+    }
+}
 
 void normalize(float* xout, uint8_t* image) {
     // normalize values [0, 255] -> [-1, 1]
@@ -336,22 +373,129 @@ void forward(Model* m, uint8_t* image) {
     float *x4 = s->x4;
     float *x5 = s->x5;
 
-    normalize(x, image);
-    printf("%d", bnconfig[0].ic);
-    // (64, 1, 5, 5)
-    im2col_cpu(x2, x, convconfig[0].ic, 28, 28, convconfig[0].ksize, convconfig[0].stride, convconfig[0].pad);
-	  matmul_conv(x2, x, p + convconfig[0].offset, convconfig[0].oc, convconfig[0].ic * convconfig[0].ksize * convconfig[0].ksize, 28 * 28, false);
-    //batchnorm(x2, x2, p + bnconfig[0].offset, bnconfig[0].ic, 28*28);
-    write_tensor(p + bnconfig[3].offset, 64);
-    printf("\n");
-    printf("ok");
-	  maxpool(x2, 28, 28, convconfig[0].oc, 2);
-	  // im2col_cpu(x, x2, convconfig[1].ic, 14, 14, convconfig[1].ksize, convconfig[1].stride, convconfig[1].pad);
-	  // matmul_conv_with_relu(x2, x, p + convconfig[1].offset, convconfig[1].oc, convconfig[1].ic * convconfig[1].ksize * convconfig[1].ksize, 14 * 14, false);
-	  // maxpool(x2, 14, 14, convconfig[1].oc, 2);
+    ConvConfig conv0 = convconfig[0];
+    ConvConfig conv1 = convconfig[1];
+    ConvConfig conv2 = convconfig[2];
+    ConvConfig conv3 = convconfig[3];
+    ConvConfig conv4 = convconfig[4];
+    ConvConfig conv5 = convconfig[5];
+    ConvConfig conv6 = convconfig[6];
+    ConvConfig conv7 = convconfig[7];
+    ConvConfig conv8 = convconfig[8];
+    ConvConfig conv9 = convconfig[9];
+    ConvConfig conv10 = convconfig[10];
+    ConvConfig conv11 = convconfig[11];
+    ConvConfig conv12 = convconfig[12];
+    ConvConfig conv13 = convconfig[13];
+    ConvConfig conv14 = convconfig[14];
 
-	  // linear_with_relu(x, x2, p + linearconfig[0].offset, linearconfig[0].in, linearconfig[0].out);
-	  // linear(x2, x, p + linearconfig[1].offset, linearconfig[1].in, linearconfig[1].out);
+
+    normalize(x, image);
+    // (64, 1, 5, 5)
+
+    int wh_in = 28;
+    // calculate the size of output
+    int wh_out = (wh_in + 2 * conv0.pad - conv0.ksize) / conv0.stride + 1;
+
+    im2col_cpu(x2, x, conv0.ic, 28, 28, conv0.ksize, conv0.stride, conv0.pad);
+	  matmul_conv(x, x2, p + conv0.offset, conv0.oc, conv0.ic * conv0.ksize * conv0.ksize, 28 * 28, false);
+    //batchnorm_with_relu(x2, x, p + bnconfig[0].offset, bnconfig[0].ic, 28*28);
+    batchnorm(x2, x, p + bnconfig[0].offset, bnconfig[0].ic, 28*28, true);
+    maxpool(x, x2, 28, 28, conv0.oc, 3, 2, 1);
+    matcopy(x2, x, conv0.oc*14*14);
+   
+    //write_tensor(p + bnconfig[3].offset, 64);
+    
+    // after maxpool, the size of input is 14*14
+    wh_in = 14;
+    wh_out = (wh_in + 2 * conv1.pad - conv1.ksize) / conv1.stride + 1;
+    // block 1
+	  im2col_cpu(x3, x, conv1.ic, 14, 14, conv1.ksize, conv1.stride, conv1.pad);
+	  matmul_conv(x, x3, p + conv1.offset, conv1.oc, conv1.ic * conv1.ksize * conv1.ksize, 14 * 14, false);
+	  batchnorm(x3, x, p + bnconfig[1].offset, bnconfig[1].ic, 14*14, true);
+    im2col_cpu(x, x3, conv2.ic, 14, 14, conv2.ksize, conv2.stride, conv2.pad);
+    matmul_conv(x3, x, p + conv2.offset, conv2.oc, conv2.ic * conv2.ksize * conv2.ksize, 14 * 14, false);
+    batchnorm(x, x3, p + bnconfig[2].offset, bnconfig[2].ic, 14*14, false);
+    // skip connection, no change
+    matadd(x, x2, conv2.oc*14*14);
+    relu(x, conv2.oc*14*14);
+    matcopy(x2, x, conv2.oc*14*14);
+    
+
+    // block 2
+    im2col_cpu(x3, x, conv3.ic, 14, 14, conv3.ksize, conv3.stride, conv3.pad);
+    matmul_conv(x, x3, p + conv3.offset, conv3.oc, conv3.ic * conv3.ksize * conv3.ksize, 14 * 14, false);
+    batchnorm_with_relu(x3, x, p + bnconfig[3].offset, bnconfig[3].ic, 14*14);
+    im2col_cpu(x, x3, conv4.ic, 14, 14, conv4.ksize, conv4.stride, conv4.pad);
+    matmul_conv(x3, x, p + conv4.offset, conv4.oc, conv4.ic * conv4.ksize * conv4.ksize, 14 * 14, false);
+    batchnorm(x, x3, p + bnconfig[4].offset, bnconfig[4].ic, 14*14, false);
+    // skip connection, no change
+    matadd(x, x2, conv4.oc*14*14);
+    relu(x, conv4.oc*14*14);
+    matcopy(x2, x, conv4.oc*14*14);
+    write_tensor(x, conv2.oc*14*14);
+
+
+
+    wh_out = (wh_in + 2 * conv5.pad - conv5.ksize) / conv5.stride + 1;
+    // block 3
+    im2col_cpu(x4, x, conv5.ic, 14, 14, conv5.ksize, conv5.stride, conv5.pad);
+    matmul_conv(x4, x, p + conv5.offset, conv5.oc, conv5.ic * conv5.ksize * conv5.ksize, 7 * 7, false);
+    batchnorm_with_relu(x4, x4, p + bnconfig[5].offset, bnconfig[5].ic, 7*7);
+    im2col_cpu(x, x4, conv6.ic, 7, 7, conv6.ksize, conv6.stride, conv6.pad);
+    matmul_conv(x, x4, p + conv6.offset, conv6.oc, conv6.ic * conv6.ksize * conv6.ksize, 7 * 7, false);
+    batchnorm(x, x, p + bnconfig[6].offset, bnconfig[6].ic, 7*7, false);
+    // skip connection, change in stride
+    im2col_cpu(x4, x2, conv7.ic, 14, 14, conv7.ksize, conv7.stride, conv7.pad);
+    matmul_conv(x4, x2, p + conv7.offset, conv7.oc, conv7.ic * conv7.ksize * conv7.ksize, 7 * 7, false);
+    batchnorm(x4, x4, p + bnconfig[7].offset, bnconfig[7].ic, 7*7, false);
+    matadd(x, x4, conv7.oc*7*7);
+    relu(x, conv7.oc*7*7);
+    matcopy(x2, x, conv7.oc*7*7);
+
+    // block 4
+    im2col_cpu(x4, x, conv8.ic, 14, 14, conv8.ksize, conv8.stride, conv8.pad);
+    matmul_conv(x4, x, p + conv8.offset, conv8.oc, conv8.ic * conv8.ksize * conv8.ksize, 14 * 14, false);
+    batchnorm_with_relu(x4, x4, p + bnconfig[8].offset, bnconfig[8].ic, 14*14);
+    im2col_cpu(x, x4, conv9.ic, 14, 14, conv9.ksize, conv9.stride, conv9.pad);
+    matmul_conv(x, x4, p + conv9.offset, conv9.oc, conv9.ic * conv9.ksize * conv9.ksize, 14 * 14, false);
+    batchnorm(x, x, p + bnconfig[9].offset, bnconfig[9].ic, 14*14, false);
+    // skip connection, no change
+    matadd(x, x2, 9*14*14);
+    relu(x, 9*14*14);
+    matcopy(x2, x, 9*14*14);
+
+    // block 5
+    im2col_cpu(x5, x, conv10.ic, 14, 14, conv10.ksize, conv10.stride, conv10.pad);
+    matmul_conv(x5, x, p + conv10.offset, conv10.oc, conv10.ic * conv10.ksize * conv10.ksize, 7 * 7, false);
+    batchnorm_with_relu(x5, x5, p + bnconfig[10].offset, bnconfig[10].ic, 7*7);
+    im2col_cpu(x, x5, conv11.ic, 7, 7, conv11.ksize, conv11.stride, conv11.pad);
+    matmul_conv(x, x5, p + conv11.offset, conv11.oc, conv11.ic * conv11.ksize * conv11.ksize, 7 * 7, false);
+    batchnorm(x, x, p + bnconfig[11].offset, bnconfig[11].ic, 7*7, false);
+    // skip connection, change in stride
+    im2col_cpu(x5, x2, conv12.ic, 14, 14, conv12.ksize, conv12.stride, conv12.pad);
+    matmul_conv(x5, x2, p + conv12.offset, conv12.oc, conv12.ic * conv12.ksize * conv12.ksize, 7 * 7, false);
+    batchnorm(x5, x5, p + bnconfig[12].offset, bnconfig[12].ic, 7*7, false);
+    matadd(x, x5, 9*7*7);
+    relu(x, 9*7*7);
+    matcopy(x2, x, 9*7*7);
+
+    // block 6
+    im2col_cpu(x5, x, conv13.ic, 7, 7, conv13.ksize, conv13.stride, conv13.pad);
+    matmul_conv(x5, x, p + conv13.offset, conv13.oc, conv13.ic * conv13.ksize * conv13.ksize, 7 * 7, false);
+    batchnorm_with_relu(x5, x5, p + bnconfig[13].offset, bnconfig[13].ic, 7*7);
+    im2col_cpu(x, x5, conv14.ic, 7, 7, conv14.ksize, conv14.stride, conv14.pad);
+    matmul_conv(x, x5, p + conv14.offset, conv14.oc, conv14.ic * conv14.ksize * conv14.ksize, 7 * 7, false);
+    batchnorm(x, x, p + bnconfig[14].offset, bnconfig[14].ic, 7*7, false);
+    // skip connection, no change
+    matadd(x, x2, 9*7*7);
+    relu(x, 9*7*7);
+
+    // global average pooling
+    avgpool(x, x, 7, 7, conv14.oc, 4, 1, 0);
+    // linear layer
+    linear(x2, x, p + linearconfig[0].offset, linearconfig[0].in, linearconfig[0].out, false);
+
 }
 
 void error_usage() {
@@ -374,10 +518,10 @@ int main(int argc, char** argv) {
         image_path = argv[i];
         read_mnist_image(image_path, image);
         forward(&model, image); // output (nclass,) is stored in model.state.x2
-        // for (int j = 0; j < model.model_config.nclass; j++) {
-        //     printf("%f\t", model.state.x2[j]);
-        // }
-        // printf("\n");
+        for (int j = 0; j < model.model_config.nclass; j++) {
+             printf("%f\t", model.state.x2[j]);
+         }
+        printf("\n");
     }
 
     free(image);

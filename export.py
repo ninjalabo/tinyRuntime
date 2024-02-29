@@ -72,7 +72,8 @@ def export_model(model, file_path = "model.bin"):
     for layer in bn_layers:
         f.write(struct.pack("2i", layer.num_features, offset))
         # set offset to the start of next layer
-        offset += layer.num_features + layer.num_features
+        # weight, bias, running_mean, running_var
+        offset += 4 * layer.num_features
 
     for layer in linear_layers:
         f.write(struct.pack("3i", layer.in_features, layer.out_features, offset))
@@ -86,6 +87,9 @@ def export_model(model, file_path = "model.bin"):
     for layer in bn_layers:
         for p in layer.parameters():
             serialize_fp32(f, p)
+        serialize_fp32(f, layer.running_mean)
+        serialize_fp32(f, layer.running_var)
+        
 
     for layer in linear_layers:
         for p in layer.parameters():
