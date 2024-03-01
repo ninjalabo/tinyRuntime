@@ -52,52 +52,6 @@ class GroupOfBlocks(nn.Module):
         return self.group(x)
 
 # resnet 
-class ResNetImagenette(nn.Module):
-  def __init__(self, n_blocks=2, n_channels=64, n_class=10):
-    super(ResNetImagenette, self).__init__()
-    self.conv1 = nn.Conv2d(in_channels=3, out_channels=n_channels, kernel_size=7, stride=1, padding=2, bias=False)
-    self.bn1 = nn.BatchNorm2d(n_channels)
-    self.act = nn.ReLU(inplace=True)
-    self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
-
-    self.group1 = GroupOfBlocks(n_channels, n_channels, n_blocks)
-    self.group2 = GroupOfBlocks(n_channels, 2*n_channels, n_blocks, stride=2)
-    self.group3 = GroupOfBlocks(2*n_channels, 4*n_channels, n_blocks, stride=2)
-    self.group4 = GroupOfBlocks(4*n_channels, 8*n_channels, n_blocks, stride=2)
-
-    self.avgpool = nn.AdaptiveAvgPool2d(output_size=(1, 1))
-    self.fc = nn.Linear(8*n_channels, n_class)
-
-    # Initialize weights
-    for m in self.modules():
-        if isinstance(m, nn.Conv2d):
-            n = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
-            m.weight.data.normal_(0, np.sqrt(2. / n))
-        elif isinstance(m, nn.BatchNorm2d):
-            m.weight.data.fill_(1)
-            m.bias.data.zero_()
-
-  def forward(self, x):
-
-    # first conv layer
-    x = self.conv1(x)
-    x = self.bn1(x)
-    x = self.act(x)
-    x = self.maxpool(x)
-
-    # residual blocks
-    x = self.group1(x)
-    x = self.group2(x)
-    x = self.group3(x)
-    x = self.group4(x)
-
-    # final
-    x = self.avgpool(x)
-    x = x.view(-1, self.fc.in_features)
-    x = self.fc(x)
-
-    return x
-  
 class ResNetMnist(nn.Module):
     def __init__(self, n_blocks=2, n_channels=64, n_class=10):
       super(ResNetMnist, self).__init__()

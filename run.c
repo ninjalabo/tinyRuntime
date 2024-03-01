@@ -69,8 +69,8 @@ void malloc_run_state(Runstate* s) {
     s->x = calloc(256*28*28, sizeof(float));
     s->x2 = calloc(256*28*28, sizeof(float));
     s->x3 = calloc(256*28*28, sizeof(float));
-    s->x4 = calloc(128*14*14, sizeof(float));
-    s->x5 = calloc(256*7*7, sizeof(float));
+    s->x4 = calloc(256*28*28, sizeof(float));
+    s->x5 = calloc(256*28*28, sizeof(float));
 }
 
 void free_run_state(Runstate* s) {
@@ -131,13 +131,10 @@ static void linear(float *xout, float *x, float *p, int in, int out, bool relu)
 		for (int j = 0; j < in; j++) {
 			val += w[i * in + j] * x[j];
 		}
-    if (relu) {
-      xout[i] = fmax(val + b[i], 0.0f);
-    } else {
-      xout[i] = val + b[i];
-    }
+    xout[i] = (relu) ? fmax(val + b[i], 0.0f) : val+b[i];
 	}
 }
+
 static void matmul_conv_with_relu(float *xout, float *x, float *p, int nchannels,
 			   int in, int out, bool bias, bool relu)
 {
@@ -195,20 +192,6 @@ static void batchnorm(float *xout, float *x, float *p, int nchannels, int in, bo
       for (int i = 0; i < in; i++){
         float val = (x[c * in + i] - running_mean[c]) / sqrt(running_var[c] + eps) * w[c] + b[c];
         xout[c * in + i] = (relu) ? fmax(val, 0.0f) : val;
-      }
-    }
-}
-
-static void batchnorm_with_relu(float *xout, float *x, float *p, int nchannels, int in){
-    // x (nchannels,in) -> xout (nchannels,in)
-    float *w = p;
-    float *b = p + nchannels;
-    float *running_mean = p + 2 * nchannels;
-    float *running_var = p + 3 * nchannels;
-    for (int c = 0; c < nchannels; c++){
-      for (int i = 0; i < in; i++){
-        float val = (x[c * in + i] - running_mean[c]) / sqrt(running_var[c] + eps) * w[c] + b[c];
-        xout[c * in + i] = fmax(val, 0.0f);
       }
     }
 }
@@ -294,7 +277,7 @@ static void avgpool(float *xout, float *x, int height, int width, int nchannels,
                         }
                     }
                 }
-                xout[xout_idx + i * out_width + j] = sum;
+                xout[xout_idx + i * out_width + j] = sum / (ksize * ksize);
             }
         }
   }
@@ -425,7 +408,7 @@ void forward(Model* m, uint8_t* image) {
     // block 2
     im2col_cpu(x3, x, conv3.ic, 14, 14, conv3.ksize, conv3.stride, conv3.pad);
     matmul_conv(x, x3, p + conv3.offset, conv3.oc, conv3.ic * conv3.ksize * conv3.ksize, 14 * 14, false);
-    batchnorm_with_relu(x3, x, p + bnconfig[3].offset, bnconfig[3].ic, 14*14);
+    batchnorm(x3, x, p + bnconfig[3].offset, bnconfig[3].ic, 14*14, true);
     im2col_cpu(x, x3, conv4.ic, 14, 14, conv4.ksize, conv4.stride, conv4.pad);
     matmul_conv(x3, x, p + conv4.offset, conv4.oc, conv4.ic * conv4.ksize * conv4.ksize, 14 * 14, false);
     batchnorm(x, x3, p + bnconfig[4].offset, bnconfig[4].ic, 14*14, false);
@@ -433,68 +416,70 @@ void forward(Model* m, uint8_t* image) {
     matadd(x, x2, conv4.oc*14*14);
     relu(x, conv4.oc*14*14);
     matcopy(x2, x, conv4.oc*14*14);
-    write_tensor(x, conv2.oc*14*14);
+     
+    //write_tensor(x, conv2.oc*14*14);
 
-
-
-    wh_out = (wh_in + 2 * conv5.pad - conv5.ksize) / conv5.stride + 1;
+    // wh_out = (wh_in + 2 * conv5.pad - conv5.ksize) / conv5.stride + 1;
     // block 3
     im2col_cpu(x4, x, conv5.ic, 14, 14, conv5.ksize, conv5.stride, conv5.pad);
-    matmul_conv(x4, x, p + conv5.offset, conv5.oc, conv5.ic * conv5.ksize * conv5.ksize, 7 * 7, false);
-    batchnorm_with_relu(x4, x4, p + bnconfig[5].offset, bnconfig[5].ic, 7*7);
+    matmul_conv(x, x4, p + conv5.offset, conv5.oc, conv5.ic * conv5.ksize * conv5.ksize, 7 * 7, false);
+    batchnorm(x4, x, p + bnconfig[5].offset, bnconfig[5].ic, 7*7, true);
     im2col_cpu(x, x4, conv6.ic, 7, 7, conv6.ksize, conv6.stride, conv6.pad);
-    matmul_conv(x, x4, p + conv6.offset, conv6.oc, conv6.ic * conv6.ksize * conv6.ksize, 7 * 7, false);
-    batchnorm(x, x, p + bnconfig[6].offset, bnconfig[6].ic, 7*7, false);
+    matmul_conv(x4, x, p + conv6.offset, conv6.oc, conv6.ic * conv6.ksize * conv6.ksize, 7 * 7, false);
+    batchnorm(x, x4, p + bnconfig[6].offset, bnconfig[6].ic, 7*7, false);
     // skip connection, change in stride
     im2col_cpu(x4, x2, conv7.ic, 14, 14, conv7.ksize, conv7.stride, conv7.pad);
-    matmul_conv(x4, x2, p + conv7.offset, conv7.oc, conv7.ic * conv7.ksize * conv7.ksize, 7 * 7, false);
-    batchnorm(x4, x4, p + bnconfig[7].offset, bnconfig[7].ic, 7*7, false);
+    matmul_conv(x2, x4, p + conv7.offset, conv7.oc, conv7.ic * conv7.ksize * conv7.ksize, 7 * 7, false);
+    batchnorm(x4, x2, p + bnconfig[7].offset, bnconfig[7].ic, 7*7, false);
     matadd(x, x4, conv7.oc*7*7);
     relu(x, conv7.oc*7*7);
     matcopy(x2, x, conv7.oc*7*7);
 
     // block 4
-    im2col_cpu(x4, x, conv8.ic, 14, 14, conv8.ksize, conv8.stride, conv8.pad);
-    matmul_conv(x4, x, p + conv8.offset, conv8.oc, conv8.ic * conv8.ksize * conv8.ksize, 14 * 14, false);
-    batchnorm_with_relu(x4, x4, p + bnconfig[8].offset, bnconfig[8].ic, 14*14);
-    im2col_cpu(x, x4, conv9.ic, 14, 14, conv9.ksize, conv9.stride, conv9.pad);
-    matmul_conv(x, x4, p + conv9.offset, conv9.oc, conv9.ic * conv9.ksize * conv9.ksize, 14 * 14, false);
-    batchnorm(x, x, p + bnconfig[9].offset, bnconfig[9].ic, 14*14, false);
+    im2col_cpu(x4, x, conv8.ic, 7, 7, conv8.ksize, conv8.stride, conv8.pad);
+    matmul_conv(x, x4, p + conv8.offset, conv8.oc, conv8.ic * conv8.ksize * conv8.ksize, 7 * 7, false);
+    batchnorm(x4, x, p + bnconfig[8].offset, bnconfig[8].ic, 7*7, true);
+    im2col_cpu(x, x4, conv9.ic, 7, 7, conv9.ksize, conv9.stride, conv9.pad);
+    matmul_conv(x4, x, p + conv9.offset, conv9.oc, conv9.ic * conv9.ksize * conv9.ksize, 7 * 7, false);
+    batchnorm(x, x4, p + bnconfig[9].offset, bnconfig[9].ic, 7*7, false);
     // skip connection, no change
-    matadd(x, x2, 9*14*14);
-    relu(x, 9*14*14);
-    matcopy(x2, x, 9*14*14);
+    matadd(x, x2, conv9.oc*7*7);
+    relu(x, conv9.oc*7*7);
+    matcopy(x2, x, conv9.oc*7*7);
+
 
     // block 5
-    im2col_cpu(x5, x, conv10.ic, 14, 14, conv10.ksize, conv10.stride, conv10.pad);
-    matmul_conv(x5, x, p + conv10.offset, conv10.oc, conv10.ic * conv10.ksize * conv10.ksize, 7 * 7, false);
-    batchnorm_with_relu(x5, x5, p + bnconfig[10].offset, bnconfig[10].ic, 7*7);
-    im2col_cpu(x, x5, conv11.ic, 7, 7, conv11.ksize, conv11.stride, conv11.pad);
-    matmul_conv(x, x5, p + conv11.offset, conv11.oc, conv11.ic * conv11.ksize * conv11.ksize, 7 * 7, false);
-    batchnorm(x, x, p + bnconfig[11].offset, bnconfig[11].ic, 7*7, false);
+    im2col_cpu(x5, x, conv10.ic, 7, 7, conv10.ksize, conv10.stride, conv10.pad);
+    matmul_conv(x, x5, p + conv10.offset, conv10.oc, conv10.ic * conv10.ksize * conv10.ksize, 4 * 4, false);
+    batchnorm(x5, x, p + bnconfig[10].offset, bnconfig[10].ic, 4*4, true);
+    im2col_cpu(x, x5, conv11.ic, 4, 4, conv11.ksize, conv11.stride, conv11.pad);
+    matmul_conv(x5, x, p + conv11.offset, conv11.oc, conv11.ic * conv11.ksize * conv11.ksize, 4 * 4, false);
+    batchnorm(x, x5, p + bnconfig[11].offset, bnconfig[11].ic, 4*4, false);
     // skip connection, change in stride
-    im2col_cpu(x5, x2, conv12.ic, 14, 14, conv12.ksize, conv12.stride, conv12.pad);
-    matmul_conv(x5, x2, p + conv12.offset, conv12.oc, conv12.ic * conv12.ksize * conv12.ksize, 7 * 7, false);
-    batchnorm(x5, x5, p + bnconfig[12].offset, bnconfig[12].ic, 7*7, false);
-    matadd(x, x5, 9*7*7);
-    relu(x, 9*7*7);
-    matcopy(x2, x, 9*7*7);
+    im2col_cpu(x5, x2, conv12.ic, 7, 7, conv12.ksize, conv12.stride, conv12.pad);
+    matmul_conv(x2, x5, p + conv12.offset, conv12.oc, conv12.ic * conv12.ksize * conv12.ksize, 4 * 4, false);
+    batchnorm(x5, x2, p + bnconfig[12].offset, bnconfig[12].ic, 4*4, false);
+    matadd(x, x5, conv12.oc*4*4);
+    relu(x, conv12.oc*4*4);
+    matcopy(x2, x, conv12.oc*4*4);
 
     // block 6
-    im2col_cpu(x5, x, conv13.ic, 7, 7, conv13.ksize, conv13.stride, conv13.pad);
-    matmul_conv(x5, x, p + conv13.offset, conv13.oc, conv13.ic * conv13.ksize * conv13.ksize, 7 * 7, false);
-    batchnorm_with_relu(x5, x5, p + bnconfig[13].offset, bnconfig[13].ic, 7*7);
-    im2col_cpu(x, x5, conv14.ic, 7, 7, conv14.ksize, conv14.stride, conv14.pad);
-    matmul_conv(x, x5, p + conv14.offset, conv14.oc, conv14.ic * conv14.ksize * conv14.ksize, 7 * 7, false);
-    batchnorm(x, x, p + bnconfig[14].offset, bnconfig[14].ic, 7*7, false);
+    im2col_cpu(x5, x, conv13.ic, 4, 4, conv13.ksize, conv13.stride, conv13.pad);
+    matmul_conv(x, x5, p + conv13.offset, conv13.oc, conv13.ic * conv13.ksize * conv13.ksize, 4 * 4, false);
+    batchnorm(x5, x, p + bnconfig[13].offset, bnconfig[13].ic, 4*4, true);
+    im2col_cpu(x, x5, conv14.ic, 4, 4, conv14.ksize, conv14.stride, conv14.pad);
+    matmul_conv(x5, x, p + conv14.offset, conv14.oc, conv14.ic * conv14.ksize * conv14.ksize, 4 * 4, false);
+    batchnorm(x, x5, p + bnconfig[14].offset, bnconfig[14].ic, 4*4, false);
     // skip connection, no change
-    matadd(x, x2, 9*7*7);
-    relu(x, 9*7*7);
+    matadd(x, x2, conv14.oc*4*4);
+    relu(x, conv14.oc*4*4);
+   
 
     // global average pooling
-    avgpool(x, x, 7, 7, conv14.oc, 4, 1, 0);
+    avgpool(x2, x, 4, 4, conv14.oc, 4, 1, 0);
     // linear layer
-    linear(x2, x, p + linearconfig[0].offset, linearconfig[0].in, linearconfig[0].out, false);
+    linear(x, x2, p + linearconfig[0].offset, linearconfig[0].in, linearconfig[0].out, false);
+    softmax(x, linearconfig[0].out);
 
 }
 
@@ -517,9 +502,9 @@ int main(int argc, char** argv) {
     for (int i = 2; i < argc; i++) {
         image_path = argv[i];
         read_mnist_image(image_path, image);
-        forward(&model, image); // output (nclass,) is stored in model.state.x2
+        forward(&model, image); // output (nclass,) is stored in model.state.x
         for (int j = 0; j < model.model_config.nclass; j++) {
-             printf("%f\t", model.state.x2[j]);
+             printf("%f\t", model.state.x[j]);
          }
         printf("\n");
     }

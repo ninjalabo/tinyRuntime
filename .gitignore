@@ -2,6 +2,11 @@
 .vscode
 data/imagenette2
 data/imagenette2.tgz
+/data
+*.txt
+*.ipynb
+run
+runq
 
 
 # Byte-compiled / optimized / DLL files
