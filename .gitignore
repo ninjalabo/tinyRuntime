@@ -3,7 +3,9 @@
 data/imagenette2
 data/imagenette2.tgz
 /data
-.txt
+stdout.txt
+err.txt
+actc.txt
 run
 runq
 /run.dSYM
