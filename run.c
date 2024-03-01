@@ -66,11 +66,11 @@ typedef struct {
 } Model;
 
 void malloc_run_state(Runstate* s) {
-    s->x = calloc(256*28*28, sizeof(float));
-    s->x2 = calloc(256*28*28, sizeof(float));
-    s->x3 = calloc(256*28*28, sizeof(float));
-    s->x4 = calloc(256*28*28, sizeof(float));
-    s->x5 = calloc(256*28*28, sizeof(float));
+    s->x = calloc(64*9*28*28, sizeof(float));
+    s->x2 = calloc(64*25*28*28, sizeof(float));
+    s->x3 = calloc(64*9*28*28, sizeof(float));
+    s->x4 = calloc(128*9*14*14, sizeof(float));
+    s->x5 = calloc(256*9*7*7, sizeof(float));
 }
 
 void free_run_state(Runstate* s) {
@@ -136,11 +136,12 @@ static void linear(float *xout, float *x, float *p, int in, int out, bool relu)
 }
 
 static void matmul_conv_with_relu(float *xout, float *x, float *p, int nchannels,
-			   int in, int out, bool bias, bool relu)
+			   int in, int out, bool bias)
 {
 	// w (nchannels,1,in) @ x (1,in,out) + b(chan,) -> xout (nchannels,out)
 	int c;
 	float *w = p;
+  float* b = p + nchannels * in;
 	//#pragma omp parallel for private(c)
 	for (c = 0; c < nchannels; c++) {
 		for (int i = 0; i < out; i++) {
@@ -148,13 +149,8 @@ static void matmul_conv_with_relu(float *xout, float *x, float *p, int nchannels
 			for (int j = 0; j < in; j++) {
 				val += w[c * in + j] * x[j * out + i];
 			}
-      // float bias_val = (bias) ? b[c] : 0.0f;
-      if (bias) {
-        float* b = p + nchannels * in;
-			  xout[c * out + i] = fmax(val + b[c], 0.0f);
-      } else {
-        xout[c * out + i] = fmax(val, 0.0f);
-      }
+        float bias_val = (bias) ? b[c] : 0.0f;
+			  xout[c * out + i] = fmax(val + bias_val, 0.0f);
 		}
 	}
 }
@@ -165,6 +161,7 @@ static void matmul_conv(float *xout, float *x, float *p, int nchannels,
 	// w (nchannels,1,in) @ x (1,in,out) + b(chan,) -> xout (nchannels,out)
 	int c;
 	float *w = p;
+  float* b = p + nchannels * in;
 	//#pragma omp parallel for private(c)
 	for (c = 0; c < nchannels; c++) {
 		for (int i = 0; i < out; i++) {
@@ -172,12 +169,8 @@ static void matmul_conv(float *xout, float *x, float *p, int nchannels,
 			for (int j = 0; j < in; j++) {
 				val += w[c * in + j] * x[j * out + i];
 			}
-      if (bias) {
-        float *b = p + nchannels * in;
-			  xout[c * out + i] = val + b[c];
-      } else {
-        xout[c * out + i] = val;
-      }
+      float bias_val = (bias) ? b[c] : 0.0f;
+			xout[c * out + i] = val + bias_val;
 		}
 	}
 }
