@@ -5,12 +5,7 @@ import torchvision
 from torchvision import transforms, datasets
 import torch
 from torch import nn
-import matplotlib.pyplot as plt
-import struct
-import os
 
-import torchvision.models as models
-from torchvision.models import ResNet18_Weights
 from model import ResNetMnist # my model
 from export import export_model
 from export import export_modelq8
@@ -65,4 +60,4 @@ def train_model(model):
         vloss, correct = test_model(model, testloader)
 
         print('LOSS train {} valid {} accuracy {:.5f}'.format(tloss, vloss, correct))
-    torch.save(model, "modelMNIST.pt")
+    torch.save(model, "model.pt")

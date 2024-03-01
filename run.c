@@ -379,8 +379,7 @@ void forward(Model* m, uint8_t* image) {
     batchnorm(x2, x, p + bnconfig[0].offset, bnconfig[0].ic, 28*28, true);
     maxpool(x, x2, 28, 28, conv0.oc, 3, 2, 1);
     matcopy(x2, x, conv0.oc*14*14);
-   
-    //write_tensor(p + bnconfig[3].offset, 64);
+  
     
     // after maxpool, the size of input is 14*14
     wh_in = 14;
@@ -410,7 +409,6 @@ void forward(Model* m, uint8_t* image) {
     relu(x, conv4.oc*14*14);
     matcopy(x2, x, conv4.oc*14*14);
      
-    //write_tensor(x, conv2.oc*14*14);
 
     // wh_out = (wh_in + 2 * conv5.pad - conv5.ksize) / conv5.stride + 1;
     // block 3
