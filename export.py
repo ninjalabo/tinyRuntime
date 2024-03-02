@@ -44,18 +44,24 @@ def quantize_q80(w, group_size):
     return int8val, scale, maxerr
 
 def export_model(model, file_path = "model.bin"):
-    ''' Export the model to filepath '''
+    '''
+    Export the quantized model to a file
+    The data inside the file follows this order:
+    1. The number of: classes, each type of layers and parameters
+    2. CNN, FC and BN layers' configuration
+    3. CNN, FC and BN layers' parameters
+    '''
     f = open(file_path, "wb")
 
     # write model config
     conv_layers = [layer for layer in model.modules() if isinstance(layer, torch.nn.Conv2d)]
     n_conv = len(conv_layers)
+    linear_layers = [layer for layer in model.modules() if isinstance(layer, torch.nn.Linear)]
+    n_linear = len(linear_layers)
     bn_layers = [layer for layer in model.modules() if isinstance(layer, torch.nn.BatchNorm2d)]
     n_bn = len(bn_layers)
-    linear_layers = [layer for layer in model.modules() if isinstance(layer, torch.nn.Linear)]
-    nlinear = len(linear_layers)
     n_classes = 10
-    header = struct.pack("iiii", n_classes, n_conv, n_bn, nlinear)
+    header = struct.pack("4i", n_classes, n_conv, n_linear, n_bn)
     f.write(header)
     # write layers' config
     offset = 0 # the number of bytes in float32 (i.e. offset 1 = 4 bytes)
@@ -70,30 +76,26 @@ def export_model(model, file_path = "model.bin"):
         else:
             offset += t_offset  # No biases
 
+    for layer in linear_layers:
+        f.write(struct.pack("3i", layer.in_features, layer.out_features, offset))
+        offset += layer.in_features * layer.out_features + layer.out_features
+
     for layer in bn_layers:
         f.write(struct.pack("2i", layer.num_features, offset))
         # set offset to the start of next layer
         # weight, bias, running_mean, running_var
         offset += 4 * layer.num_features
 
-    for layer in linear_layers:
-        f.write(struct.pack("3i", layer.in_features, layer.out_features, offset))
-        offset += layer.in_features * layer.out_features + layer.out_features
-
     # write the weights and biases of the model
-    for layer in conv_layers:
+    for layer in [*conv_layers, *linear_layers]:
         for p in layer.parameters():
             serialize_fp32(f, p)
-    
+
     for layer in bn_layers:
         for p in layer.parameters():
             serialize_fp32(f, p)
         serialize_fp32(f, layer.running_mean)
         serialize_fp32(f, layer.running_var)
-
-    for layer in linear_layers:
-        for p in layer.parameters():
-            serialize_fp32(f, p)
 
     f.close()
     print(f"wrote {file_path}")
@@ -117,20 +119,24 @@ def export_modelq8(model_path="model.pt", file_path="modelq8.bin", gs=64):
     '''
     Export the quantized model to a file
     The data inside the file follows this order:
-    1. The number of classes, CNN layers, and FC layers, parameters.
-    2. CNN and FC layers' configuration.
-    3. CNN and FC layers' quantized parameters.
-    4. CNN and FC layers' scaling factors.
+    1. The number of: classes, each type of layers and parameters
+    2. CNN, FC and BN layers' configuration
+    3. CNN and FC layers' quantized parameters
+    4. CNN and FC layers' scaling factors
+    5. BN layers' parameters
     '''
     model = torch.load(model_path)
     f = open(file_path, "wb")
     # write model config
-    conv_layers = [model.conv1, model.conv2]
+    conv_layers = [layer for layer in model.modules() if isinstance(layer, torch.nn.Conv2d)]
     nconv = len(conv_layers)
-    linear_layers = [model.fc1, model.fc2]
+    linear_layers = [layer for layer in model.modules() if isinstance(layer, torch.nn.Linear)]
     nlinear = len(linear_layers)
-    nparameters = sum(p.numel() for p in model.parameters())
-    header = struct.pack("4i", model.nclasses, nconv, nlinear, nparameters)
+    bn_layers = [layer for layer in model.modules() if isinstance(layer, torch.nn.BatchNorm2d)]
+    nbn = len(bn_layers)
+    nclasses = 10
+    nparameters = sum(p.numel() for layer in [*conv_layers, *linear_layers] for p in layer.parameters())
+    header = struct.pack("5i", nclasses, nconv, nlinear, nbn, nparameters)
     f.write(header)
     # write layers' config
     qoffset = 0 # offset for quantized parameters
@@ -139,16 +145,14 @@ def export_modelq8(model_path="model.pt", file_path="modelq8.bin", gs=64):
     for layer in conv_layers:
         # calculates group sizes for weights and biases
         gs_weight = calculate_groupsize(layer.in_channels * layer.kernel_size[0]**2, gs)
-        gs_bias = calculate_groupsize(layer.out_channels, gs)
         group_sizes.append(gs_weight)
-        group_sizes.append(gs_bias)
 
-        f.write(struct.pack("9i", layer.kernel_size[0], layer.stride[0], layer.padding[0],
-                layer.in_channels, layer.out_channels, qoffset, soffset, gs_weight, gs_bias))
+        f.write(struct.pack("8i", layer.kernel_size[0], layer.stride[0], layer.padding[0],
+                layer.in_channels, layer.out_channels, qoffset, soffset, gs_weight))
         # set offsets to the start of next layer
         nweights = layer.out_channels * layer.in_channels * layer.kernel_size[0]**2
-        qoffset += nweights + layer.out_channels
-        soffset += nweights // gs_weight + layer.out_channels // gs_bias
+        qoffset += nweights
+        soffset += nweights // gs_weight
 
     for layer in linear_layers:
         gs_weight = calculate_groupsize(layer.in_features, gs)
@@ -163,6 +167,12 @@ def export_modelq8(model_path="model.pt", file_path="modelq8.bin", gs=64):
         qoffset += nweights + layer.out_features
         soffset += nweights // gs_weight + layer.out_features // gs_bias
 
+    for layer in bn_layers:
+        f.write(struct.pack("2i", layer.num_features, soffset))
+        # weight, bias, running_mean, running_var
+        soffset += 4 * layer.num_features
+
+    # write layers' parameters
     ew = []
     scaling_factors = []
     i = 0
@@ -177,6 +187,10 @@ def export_modelq8(model_path="model.pt", file_path="modelq8.bin", gs=64):
 
     for s in scaling_factors:
         serialize_fp32(f, s) # save scale factors
+
+    for layer in bn_layers:
+        for p in [layer.weight, layer.bias, layer.running_mean, layer.running_var]:
+            serialize_fp32(f, p)
 
     # print the highest error across all parameters, should be very small, e.g. O(~0.001)
     ew.sort(reverse=True)
