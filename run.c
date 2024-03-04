@@ -13,13 +13,17 @@
 #include <sys/stat.h>
 #include <stdbool.h>
 
-#define IMAGE_SZ (28*28)
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+
+#define IMAGE_SZ (3 * 224 * 224)        // model input image size (all images are resized to this)
+#define MAX_IMAGE_SZ 562500         // max image size in Imagenette
 
 // avoid division by zero
 #define eps 0.00001f
 
 typedef struct {
-    int nclass; // the number of classes
+    int nclasses; // the number of classes
     int n_conv; // the number of convolutional layers
     int n_linear; // the number of linear layers
     int n_bn; // the number of batchnorm layers
@@ -51,6 +55,7 @@ typedef struct {
     float* x3; // buffer to store the output of a layer (9*28*28,)
     float* x4; // buffer to store the output of a layer (9*14*14,)
     float* x5; // buffer to store the output of a layer (9*7*7,)
+    float* x6; // buffer to store the output of a layer (9*7*7,)
 } Runstate;
 
 typedef struct {
@@ -66,11 +71,12 @@ typedef struct {
 } Model;
 
 void malloc_run_state(Runstate* s) {
-    s->x = calloc(64*9*28*28, sizeof(float));
-    s->x2 = calloc(64*25*28*28, sizeof(float));
-    s->x3 = calloc(64*9*28*28, sizeof(float));
-    s->x4 = calloc(128*9*14*14, sizeof(float));
-    s->x5 = calloc(256*9*7*7, sizeof(float));
+    s->x = calloc(3*49*112*112, sizeof(float));
+    s->x2 = calloc(3*49*112*112, sizeof(float));
+    s->x3 = calloc(64*9*56*56, sizeof(float));
+    s->x4 = calloc(128*9*28*28, sizeof(float));
+    s->x5 = calloc(256*9*14*14, sizeof(float));
+    s->x6 = calloc(512*9*7*7, sizeof(float));
 }
 
 void free_run_state(Runstate* s) {
@@ -79,6 +85,7 @@ void free_run_state(Runstate* s) {
     free(s->x3);
     free(s->x4);
     free(s->x5);
+    free(s->x6);
 }
 
 void read_checkpoint(char* path, ModelConfig* config, ConvConfig **conv_config, LinearConfig **linear_config, 
@@ -287,7 +294,7 @@ void matcopy(float* x, float* y, int size) {
 void normalize(float* xout, uint8_t* image) {
     // normalize values [0, 255] -> [-1, 1]
     for (int i = 0; i < IMAGE_SZ; i++) {
-        xout[i] = ((float) image[i] / 255 - 0.5) / 0.5;
+        xout[i] = ((float) image[i] / 255);
     }
 }
 
@@ -311,11 +318,86 @@ void softmax(float* x, int size) {
     }
 }
 
-void read_mnist_image(char* path, uint8_t *image) {
-    FILE* file = fopen(path, "rb");
-    if (!file) { perror("Error opening file"); exit(EXIT_FAILURE); }
-    fread(image, sizeof(uint8_t), IMAGE_SZ, file);
-    fclose(file);
+// FIX: the results is different compared to transforms.Resize(224, 224) in pytorch
+void bilinear_interpolation(uint8_t **resized_image, uint8_t *image, int input_height,
+                             int input_width) {
+    // resize image to 224 x 224 using bilinear interpolation
+    int nchannels = 3;
+    int out_height = 224;
+    int out_width = 224;
+
+    for (int c = 0; c < nchannels; ++c) {
+        int im_idx = c * input_height * input_width;        // start index for image
+        int rim_idx = c * out_height * out_width;       // start index for resized image
+        for (int h = 0; h < out_height; ++h) {
+            for (int w = 0; w < out_width; ++w) {
+                // Calculate corresponding position in the source image
+                float src_h_f = h * (input_height - 1) / (float)(out_height - 1);
+                float src_w_f = w * (input_width - 1) / (float)(out_width - 1);
+
+                int src_h0 = floor(src_h_f);
+                int src_w0 = floor(src_w_f);
+                int src_h1 = src_h0 + 1;
+                int src_w1 = src_w0 + 1;
+
+                // Perform bilinear interpolation
+                (*resized_image)[rim_idx + h * out_width + w] =
+                    (1 - fabs(src_h_f - src_h0)) * (1 - fabs(src_w_f - src_w0)) * image[im_idx + src_h0 * input_width + src_w0] +
+                    (1 - fabs(src_h_f - src_h0)) * (1 - fabs(src_w_f - src_w1)) * image[im_idx + src_h0 * input_width + src_w1] +
+                    (1 - fabs(src_h_f - src_h1)) * (1 - fabs(src_w_f - src_w0)) * image[im_idx + src_h1 * input_width + src_w0] +
+                    (1 - fabs(src_h_f - src_h1)) * (1 - fabs(src_w_f - src_w1)) * image[im_idx + + src_h1 * input_width + src_w1];
+            }
+        }
+    }
+}
+
+// FIX results different compared to transforms.CenterCrop(224, 224) in pytorch
+void center_crop(uint8_t** resized_image, uint8_t* image, int height, int width) {
+    int target_height = 224;
+    int target_width = 224;
+    if (target_height > height || target_width > width) {
+        printf("Error: Target size is larger than the input image.\n");
+        exit(EXIT_FAILURE);
+    }
+    int start_row = (height - target_height) / 2;
+    int start_col = (width - target_width) / 2;
+
+    // copy the cropped region
+    for (int c = 0; c < 3; c++) {
+        int im_idx = c * height * width;        // start index for image
+        int rim_idx = c * target_height * target_width;       // start index for resized image
+        for (int i = 0; i < target_height; i++) {
+            for (int j = 0; j < target_width; j++) {
+                (*resized_image)[rim_idx + i * target_width + j] = image[im_idx + (i + start_row) * width + j + start_col];
+            }
+        }
+    }
+}
+
+void read_imagenette_image(char *path, uint8_t **image, int *height, int *width) {
+    // read the image and its size using stb_image
+    int nchannels;
+
+    uint8_t *data = stbi_load(path, width, height, &nchannels, 0);
+
+    if (!data) {
+        fprintf(stderr, "Error loading image: %s\n", stbi_failure_reason());
+        exit(EXIT_FAILURE);
+    }
+    if (nchannels != 3) {
+        fprintf(stderr, "Number of channels doesn't match\n");
+        exit(EXIT_FAILURE);
+    }
+
+    // Permute dimensions to (C x H x W) format
+    for (int c = 0; c < nchannels; ++c) {
+        for (int h = 0; h < (*height); ++h) {
+            for (int w = 0; w < (*width); ++w) {
+                (*image)[c * (*height) * (*width) + h * (*width)+ w] = data[(h * (*width) + w) * nchannels + c];
+            }
+        }
+    }
+    free(data);
 }
 
 #ifdef DEBUG
@@ -328,7 +410,7 @@ void write_tensor(float* x, int size) {
 }
 #endif
 
-void forward(Model* m, uint8_t* image) {
+void forward(Model* m, uint8_t* resized_image) {
     ConvConfig *conv_config = m->conv_config;
 	LinearConfig *linear_config = m->linear_config;
     BnConfig *bn_config = m->bn_config;
@@ -339,6 +421,7 @@ void forward(Model* m, uint8_t* image) {
     float *x3 = s->x3;
     float *x4 = s->x4;
     float *x5 = s->x5;
+    float *x6 = s->x6;
 
     ConvConfig conv0 = conv_config[0];
     ConvConfig conv1 = conv_config[1];
@@ -355,96 +438,129 @@ void forward(Model* m, uint8_t* image) {
     ConvConfig conv12 = conv_config[12];
     ConvConfig conv13 = conv_config[13];
     ConvConfig conv14 = conv_config[14];
+    ConvConfig conv15 = conv_config[15];
+    ConvConfig conv16 = conv_config[16];
+    ConvConfig conv17 = conv_config[17];
+    ConvConfig conv18 = conv_config[18];
+    ConvConfig conv19 = conv_config[19];
 
-    normalize(x, image);
 
-    im2col_cpu(x2, x, 28, 28, conv0);
-	matmul_conv(x, x2, p, conv0, 28 * 28, false, false);
-    //batchnorm_with_relu(x2, x, p + bnconfig[0].offset, bnconfig[0].ic, 28*28);
-    batchnorm(x2, x, p + bn_config[0].offset, bn_config[0].ic, 28*28, true);
-    maxpool(x, x2, 28, 28, conv0.oc, 3, 2, 1);
-    matcopy(x2, x, conv0.oc*14*14);
+
+    normalize(x, resized_image);
+
+    im2col_cpu(x2, x, 224, 224, conv0);
+	matmul_conv(x, x2, p, conv0, 112 * 112, false, false);
+    batchnorm(x2, x, p + bn_config[0].offset, bn_config[0].ic, 112 * 112, true);
+    maxpool(x, x2, 112, 112, conv0.oc, 3, 2, 1);
+    matcopy(x2, x, conv0.oc * 56 * 56);
 
     // block 1
-	im2col_cpu(x3, x, 14, 14, conv1);
-	matmul_conv(x, x3, p, conv1, 14 * 14, false, false);
-	batchnorm(x3, x, p + bn_config[1].offset, bn_config[1].ic, 14*14, true);
-    im2col_cpu(x, x3, 14, 14, conv2);
-    matmul_conv(x3, x, p, conv2, 14 * 14, false, false);
-    batchnorm(x, x3, p + bn_config[2].offset, bn_config[2].ic, 14*14, false);
+	im2col_cpu(x3, x, 56, 56, conv1);
+	matmul_conv(x, x3, p, conv1, 56 * 56, false, false);
+	batchnorm(x3, x, p + bn_config[1].offset, bn_config[1].ic, 56 * 56, true);
+    im2col_cpu(x, x3, 56, 56, conv2);
+    matmul_conv(x3, x, p, conv2, 56 * 56, false, false);
+    batchnorm(x, x3, p + bn_config[2].offset, bn_config[2].ic, 56 * 56, false);
     // skip connection, no change
-    matadd(x, x2, conv2.oc*14*14);
-    relu(x, conv2.oc*14*14);
-    matcopy(x2, x, conv2.oc*14*14);
+    matadd(x, x2, conv2.oc * 56 * 56);
+    relu(x, conv2.oc * 56 * 56);
+    matcopy(x2, x, conv2.oc * 56 * 56);
 
     // block 2
-    im2col_cpu(x3, x, 14, 14, conv3);
-    matmul_conv(x, x3, p, conv3, 14 * 14, false, false);
-    batchnorm(x3, x, p + bn_config[3].offset, bn_config[3].ic, 14*14, true);
-    im2col_cpu(x, x3, 14, 14, conv4);
-    matmul_conv(x3, x, p, conv4, 14 * 14, false, false);
-    batchnorm(x, x3, p + bn_config[4].offset, bn_config[4].ic, 14*14, false);
+    im2col_cpu(x3, x, 56, 56, conv3);
+    matmul_conv(x, x3, p, conv3, 56 * 56, false, false);
+    batchnorm(x3, x, p + bn_config[3].offset, bn_config[3].ic, 56 * 56, true);
+    im2col_cpu(x, x3, 56, 56, conv4);
+    matmul_conv(x3, x, p, conv4, 56 * 56, false, false);
+    batchnorm(x, x3, p + bn_config[4].offset, bn_config[4].ic, 56 * 56, false);
     // skip connection, no change
-    matadd(x, x2, conv4.oc*14*14);
-    relu(x, conv4.oc*14*14);
-    matcopy(x2, x, conv4.oc*14*14);
+    matadd(x, x2, conv4.oc * 56 * 56);
+    relu(x, conv4.oc * 56 * 56);
+    matcopy(x2, x, conv4.oc * 56 * 56);
 
     // block 3
-    im2col_cpu(x4, x, 14, 14, conv5);
-    matmul_conv(x, x4, p, conv5, 7 * 7, false, false);
-    batchnorm(x4, x, p + bn_config[5].offset, bn_config[5].ic, 7*7, true);
-    im2col_cpu(x, x4, 7, 7, conv6);
-    matmul_conv(x4, x, p, conv6, 7 * 7, false, false);
-    batchnorm(x, x4, p + bn_config[6].offset, bn_config[6].ic, 7*7, false);
+    im2col_cpu(x4, x, 56, 56, conv5);
+    matmul_conv(x, x4, p, conv5, 28 * 28, false, false);
+    batchnorm(x4, x, p + bn_config[5].offset, bn_config[5].ic, 28 * 28, true);
+    im2col_cpu(x, x4, 28, 28, conv6);
+    matmul_conv(x4, x, p, conv6, 28 * 28, false, false);
+    batchnorm(x, x4, p + bn_config[6].offset, bn_config[6].ic, 28 * 28, false);
 
     // skip connection, change in stride
-    im2col_cpu(x4, x2, 14, 14, conv7);
-    matmul_conv(x2, x4, p, conv7, 7 * 7, false, false);
-    batchnorm(x4, x2, p + bn_config[7].offset, bn_config[7].ic, 7*7, false);
-    matadd(x, x4, conv7.oc*7*7);
-    relu(x, conv7.oc*7*7);
-    matcopy(x2, x, conv7.oc*7*7);
+    im2col_cpu(x4, x2, 56, 56, conv7);
+    matmul_conv(x2, x4, p, conv7, 28 * 28, false, false);
+    batchnorm(x4, x2, p + bn_config[7].offset, bn_config[7].ic, 28 * 28, false);
+    matadd(x, x4, conv7.oc * 28 * 28);
+    relu(x, conv7.oc * 28 * 28);
+    matcopy(x2, x, conv7.oc * 28 * 28);
 
     // block 4
-    im2col_cpu(x4, x, 7, 7, conv8);
-    matmul_conv(x, x4, p, conv8, 7 * 7, false, false);
-    batchnorm(x4, x, p + bn_config[8].offset, bn_config[8].ic, 7*7, true);
-    im2col_cpu(x, x4, 7, 7, conv9);
-    matmul_conv(x4, x, p, conv9, 7 * 7, false, false);
-    batchnorm(x, x4, p + bn_config[9].offset, bn_config[9].ic, 7*7, false);
+    im2col_cpu(x4, x, 28, 28, conv8);
+    matmul_conv(x, x4, p, conv8, 28 * 28, false, false);
+    batchnorm(x4, x, p + bn_config[8].offset, bn_config[8].ic, 28 * 28, true);
+    im2col_cpu(x, x4, 28, 28, conv9);
+    matmul_conv(x4, x, p, conv9, 28 * 28, false, false);
+    batchnorm(x, x4, p + bn_config[9].offset, bn_config[9].ic, 28 * 28, false);
     // skip connection, no change
-    matadd(x, x2, conv9.oc*7*7);
-    relu(x, conv9.oc*7*7);
-    matcopy(x2, x, conv9.oc*7*7);
+    matadd(x, x2, conv9.oc * 28 * 28);
+    relu(x, conv9.oc * 28 * 28);
+    matcopy(x2, x, conv9.oc * 28 * 28);
 
     // block 5
-    im2col_cpu(x5, x, 7, 7, conv10);
-    matmul_conv(x, x5, p, conv10, 4 * 4, false, false);
-    batchnorm(x5, x, p + bn_config[10].offset, bn_config[10].ic, 4*4, true);
-    im2col_cpu(x, x5, 4, 4, conv11);
-    matmul_conv(x5, x, p, conv11, 4 * 4, false, false);
-    batchnorm(x, x5, p + bn_config[11].offset, bn_config[11].ic, 4*4, false);
+    im2col_cpu(x5, x, 28, 28, conv10);
+    matmul_conv(x, x5, p, conv10, 14 * 14, false, false);
+    batchnorm(x5, x, p + bn_config[10].offset, bn_config[10].ic, 14 * 14, true);
+    im2col_cpu(x, x5, 14, 14, conv11);
+    matmul_conv(x5, x, p, conv11, 14 * 14, false, false);
+    batchnorm(x, x5, p + bn_config[11].offset, bn_config[11].ic, 14 * 14, false);
     // skip connection, change in stride
-    im2col_cpu(x5, x2, 7, 7, conv12);
-    matmul_conv(x2, x5, p, conv12, 4 * 4, false, false);
-    batchnorm(x5, x2, p + bn_config[12].offset, bn_config[12].ic, 4*4, false);
-    matadd(x, x5, conv12.oc*4*4);
-    relu(x, conv12.oc*4*4);
-    matcopy(x2, x, conv12.oc*4*4);
+    im2col_cpu(x5, x2, 28, 28, conv12);
+    matmul_conv(x2, x5, p, conv12, 14 * 14, false, false);
+    batchnorm(x5, x2, p + bn_config[12].offset, bn_config[12].ic, 14 * 14, false);
+    matadd(x, x5, conv12.oc * 14 * 14);
+    relu(x, conv12.oc * 14 * 14);
+    matcopy(x2, x, conv12.oc * 14 * 14);
 
     // block 6
-    im2col_cpu(x5, x, 4, 4, conv13);
-    matmul_conv(x, x5, p, conv13, 4 * 4, false, false);
-    batchnorm(x5, x, p + bn_config[13].offset, bn_config[13].ic, 4*4, true);
-    im2col_cpu(x, x5, 4, 4, conv14);
-    matmul_conv(x5, x, p, conv14, 4 * 4, false, false);
-    batchnorm(x, x5, p + bn_config[14].offset, bn_config[14].ic, 4*4, false);
+    im2col_cpu(x5, x, 14, 14, conv13);
+    matmul_conv(x, x5, p, conv13, 14 * 14, false, false);
+    batchnorm(x5, x, p + bn_config[13].offset, bn_config[13].ic, 14 * 14, true);
+    im2col_cpu(x, x5, 14, 14, conv14);
+    matmul_conv(x5, x, p, conv14, 14 * 14, false, false);
+    batchnorm(x, x5, p + bn_config[14].offset, bn_config[14].ic, 14 * 14, false);
     // skip connection, no change
-    matadd(x, x2, conv14.oc*4*4);
-    relu(x, conv14.oc*4*4);
+    matadd(x, x2, conv14.oc * 14 * 14);
+    relu(x, conv14.oc * 14 * 14);
+    matcopy(x2, x, conv14.oc * 14 * 14);
+
+    // block 7
+    im2col_cpu(x6, x, 14, 14, conv15);
+    matmul_conv(x, x6, p, conv15, 7 * 7, false, false);
+    batchnorm(x6, x, p + bn_config[15].offset, bn_config[15].ic, 7 * 7, true);
+    im2col_cpu(x, x6, 7, 7, conv16);
+    matmul_conv(x6, x, p, conv16, 7 * 7, false, false);
+    batchnorm(x, x6, p + bn_config[16].offset, bn_config[16].ic, 7 * 7, false);
+    // skip connection, change in stride
+    im2col_cpu(x6, x2, 14, 14, conv17);
+    matmul_conv(x2, x6, p, conv17, 7 * 7, false, false);
+    batchnorm(x6, x2, p + bn_config[17].offset, bn_config[17].ic, 7 * 7, false);
+    matadd(x, x6, conv17.oc * 7 * 7);
+    relu(x, conv17.oc * 7 * 7);
+    matcopy(x2, x, conv17.oc * 7 * 7);
+
+    // block 8
+    im2col_cpu(x6, x, 7, 7, conv18);
+    matmul_conv(x, x6, p, conv18, 7 * 7, false, false);
+    batchnorm(x6, x, p + bn_config[18].offset, bn_config[18].ic, 7 * 7, true);
+    im2col_cpu(x, x6, 7, 7, conv19);
+    matmul_conv(x6, x, p, conv19, 7 * 7, false, false);
+    batchnorm(x, x6, p + bn_config[19].offset, bn_config[19].ic, 7 * 7, false);
+    // skip connection, no change
+    matadd(x, x2, conv19.oc * 7 * 7);
+    relu(x, conv19.oc * 7 * 7);
 
     // global average pooling
-    avgpool(x2, x, 4, 4, conv14.oc, 4, 1, 0);
+    avgpool(x2, x, 7, 7, conv19.oc, 7, 1, 0);
     // linear layer
     linear(x, x2, p, linear_config[0], false);
     softmax(x, linear_config[0].out);
@@ -457,26 +573,36 @@ void error_usage() {
 }
 
 int main(int argc, char** argv) {
-    char* model_path = NULL;
-    char* image_path = NULL;
+    char *model_path = NULL;
+    char *image_path = NULL;
 
     // read images and model path, then outputs the probability distribution for the given images.
     if (argc < 3) { error_usage(); }
-    model_path = argv[1]; 
+    model_path = argv[1];
     Model model;
     build_model(&model, model_path);
-    uint8_t* image = malloc(IMAGE_SZ);
+
+    int input_height;
+    int input_width;
+    uint8_t *image = malloc(MAX_IMAGE_SZ);
+    uint8_t *resized_image = malloc(IMAGE_SZ);
+
     for (int i = 2; i < argc; i++) {
         image_path = argv[i];
-        read_mnist_image(image_path, image);
-        forward(&model, image); // output (nclass,) is stored in model.state.x
-        for (int j = 0; j < model.model_config.nclass; j++) {
-             printf("%f\t", model.state.x[j]);
-         }
+        // read input image, its height and width
+        read_imagenette_image(image_path, &image, &input_height, &input_width);
+        // resize image to 224 x 224
+        // bilinear_interpolation(&resized_image, image, input_height, input_width);
+        center_crop(&resized_image, image, input_height, input_width);
+        forward(&model, resized_image); // output (nclass,) is stored in model.state.x
+        for (int j = 0; j < model.model_config.nclasses; j++) {
+            printf("%f\t", model.state.x[j]);
+        }
         printf("\n");
     }
 
     free(image);
+    free(resized_image);
     free_model(&model);
     return 0;
 }
