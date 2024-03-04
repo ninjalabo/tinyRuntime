@@ -53,9 +53,6 @@ typedef struct {
     float* x; // buffer to store the input (28*28,)
     float* x2; // buffer to store the output of a layer (25*28*28,)
     float* x3; // buffer to store the output of a layer (9*28*28,)
-    float* x4; // buffer to store the output of a layer (9*14*14,)
-    float* x5; // buffer to store the output of a layer (9*7*7,)
-    float* x6; // buffer to store the output of a layer (9*7*7,)
 } Runstate;
 
 typedef struct {
@@ -71,21 +68,15 @@ typedef struct {
 } Model;
 
 void malloc_run_state(Runstate* s) {
-    s->x = calloc(3*49*112*112, sizeof(float));
+    s->x = calloc(64*9*56*56, sizeof(float));
     s->x2 = calloc(3*49*112*112, sizeof(float));
     s->x3 = calloc(64*9*56*56, sizeof(float));
-    s->x4 = calloc(128*9*28*28, sizeof(float));
-    s->x5 = calloc(256*9*14*14, sizeof(float));
-    s->x6 = calloc(512*9*7*7, sizeof(float));
 }
 
 void free_run_state(Runstate* s) {
     free(s->x);
     free(s->x2);
     free(s->x3);
-    free(s->x4);
-    free(s->x5);
-    free(s->x6);
 }
 
 void read_checkpoint(char* path, ModelConfig* config, ConvConfig **conv_config, LinearConfig **linear_config, 
@@ -177,7 +168,7 @@ static float im2col_get_pixel(float *im, int height, int width, int row, int col
 	return im[col + width * (row + height * channel)];
 }
 
-static void im2col_cpu(float *col, float *im, int height, int width, ConvConfig cc)
+static void im2col_cpu(float *col, float *im, int *height, int *width, ConvConfig cc)
 {
 	// im (nchannels, height, width) -> col (col_size, out_height * out_width)
     int nchannels = cc.ic;
@@ -186,8 +177,8 @@ static void im2col_cpu(float *col, float *im, int height, int width, ConvConfig 
     int pad = cc.pad;
 
 	int c, h, w;
-	int out_height = (height + 2 * pad - ksize) / stride + 1;
-	int out_width = (width + 2 * pad - ksize) / stride + 1;
+	int out_height = (*height + 2 * pad - ksize) / stride + 1;
+	int out_width = (*width + 2 * pad - ksize) / stride + 1;
 
 	int col_size = nchannels * ksize * ksize;
 	for (c = 0; c < col_size; c++) {
@@ -201,12 +192,15 @@ static void im2col_cpu(float *col, float *im, int height, int width, ConvConfig 
 				int col_index =
 				    (c * out_height + h) * out_width + w;
 				col[col_index] =
-				    im2col_get_pixel(im, height, width,
+				    im2col_get_pixel(im, *height, *width,
 						     input_row, input_col,
 						     channel, pad);
 			}
 		}
 	}
+    // update current height and width
+    *height = out_height;
+    *width = out_width;
 }
 
 static void batchnorm(float *xout, float *x, float *p, int nchannels, int in, bool relu){
@@ -223,10 +217,10 @@ static void batchnorm(float *xout, float *x, float *p, int nchannels, int in, bo
     }
 }
 
-static void maxpool(float *xout, float *x, int height, int width, int nchannels, int ksize, int stride, int pad)
+static void maxpool(float *xout, float *x, int *height, int *width, int nchannels, int ksize, int stride, int pad)
 {
-    int out_height = (height + 2 * pad - ksize) / stride + 1;
-    int out_width = (width + 2 * pad - ksize) / stride + 1;
+    int out_height = (*height + 2 * pad - ksize) / stride + 1;
+    int out_width = (*width + 2 * pad - ksize) / stride + 1;
 
     for (int c = 0; c < nchannels; c++) {
         int xout_idx = c * out_height * out_width; // start index for xout
@@ -237,8 +231,8 @@ static void maxpool(float *xout, float *x, int height, int width, int nchannels,
                     for (int kj = 0; kj < ksize; kj++) {
                         int input_row = i * stride + ki - pad;
                         int input_col = j * stride + kj - pad;
-                        if (input_row >= 0 && input_row < height && input_col >= 0 && input_col < width) {
-                            cmax = fmax(cmax, x[c * height * width + input_row * width + input_col]);
+                        if (input_row >= 0 && input_row < *height && input_col >= 0 && input_col < *width) {
+                            cmax = fmax(cmax, x[c * (*height) * (*width) + input_row * (*width) + input_col]);
                         }
                     }
                 }
@@ -246,13 +240,15 @@ static void maxpool(float *xout, float *x, int height, int width, int nchannels,
             }
         }
     }
+    *height = out_height;
+    *width = out_width;
 }
 
-static void avgpool(float *xout, float *x, int height, int width, int nchannels, int ksize, int stride, int pad){
-  int out_height = (height + 2 * pad - ksize) / stride + 1;
-  int out_width = (width + 2 * pad - ksize) / stride + 1;
+static void avgpool(float *xout, float *x, int *height, int *width, int nchannels, int ksize, int stride, int pad){
+    int out_height = (*height + 2 * pad - ksize) / stride + 1;
+    int out_width = (*width + 2 * pad - ksize) / stride + 1;
   
-  for (int c = 0; c < nchannels; c++) {
+    for (int c = 0; c < nchannels; c++) {
         int xout_idx = c * out_height * out_width; // start index for xout
         for (int i = 0; i < out_height; i++) {
             for (int j = 0; j < out_width; j++) {
@@ -261,15 +257,17 @@ static void avgpool(float *xout, float *x, int height, int width, int nchannels,
                     for (int kj = 0; kj < ksize; kj++) {
                         int input_row = i * stride + ki - pad;
                         int input_col = j * stride + kj - pad;
-                        if (input_row >= 0 && input_row < height && input_col >= 0 && input_col < width) {
-                            sum += x[c * height * width + input_row * width + input_col];
+                        if (input_row >= 0 && input_row < *height && input_col >= 0 && input_col < *width) {
+                            sum += x[c * (*height) * (*width) + input_row * (*width) + input_col];
                         }
                     }
                 }
                 xout[xout_idx + i * out_width + j] = sum / (ksize * ksize);
             }
         }
-  }
+    }
+    *height = out_height;
+    *width = out_width;
 }
 
 void matadd(float* x, float* y, int size){
@@ -419,148 +417,72 @@ void forward(Model* m, uint8_t* resized_image) {
 	float *x = s->x;
 	float *x2 = s->x2;
     float *x3 = s->x3;
-    float *x4 = s->x4;
-    float *x5 = s->x5;
-    float *x6 = s->x6;
 
-    ConvConfig conv0 = conv_config[0];
-    ConvConfig conv1 = conv_config[1];
-    ConvConfig conv2 = conv_config[2];
-    ConvConfig conv3 = conv_config[3];
-    ConvConfig conv4 = conv_config[4];
-    ConvConfig conv5 = conv_config[5];
-    ConvConfig conv6 = conv_config[6];
-    ConvConfig conv7 = conv_config[7];
-    ConvConfig conv8 = conv_config[8];
-    ConvConfig conv9 = conv_config[9];
-    ConvConfig conv10 = conv_config[10];
-    ConvConfig conv11 = conv_config[11];
-    ConvConfig conv12 = conv_config[12];
-    ConvConfig conv13 = conv_config[13];
-    ConvConfig conv14 = conv_config[14];
-    ConvConfig conv15 = conv_config[15];
-    ConvConfig conv16 = conv_config[16];
-    ConvConfig conv17 = conv_config[17];
-    ConvConfig conv18 = conv_config[18];
-    ConvConfig conv19 = conv_config[19];
-
-
+    int h = 224;        // height
+    int w = 224;        // width
+    int h_prev;         // buffer to store previous height for skip connection
+    int w_prev;         // buffer to store previous width for skip connection
 
     normalize(x, resized_image);
 
-    im2col_cpu(x2, x, 224, 224, conv0);
-	matmul_conv(x, x2, p, conv0, 112 * 112, false, false);
-    batchnorm(x2, x, p + bn_config[0].offset, bn_config[0].ic, 112 * 112, true);
-    maxpool(x, x2, 112, 112, conv0.oc, 3, 2, 1);
-    matcopy(x2, x, conv0.oc * 56 * 56);
+    im2col_cpu(x2, x, &h, &w, conv_config[0]);
+	matmul_conv(x, x2, p, conv_config[0], h * w, false, false);
+    batchnorm(x2, x, p + bn_config[0].offset, bn_config[0].ic, h * w, true);
+    maxpool(x, x2, &h, &w, conv_config[0].oc, 3, 2, 1);
+    matcopy(x2, x, conv_config[0].oc * h * w);
 
-    // block 1
-	im2col_cpu(x3, x, 56, 56, conv1);
-	matmul_conv(x, x3, p, conv1, 56 * 56, false, false);
-	batchnorm(x3, x, p + bn_config[1].offset, bn_config[1].ic, 56 * 56, true);
-    im2col_cpu(x, x3, 56, 56, conv2);
-    matmul_conv(x3, x, p, conv2, 56 * 56, false, false);
-    batchnorm(x, x3, p + bn_config[2].offset, bn_config[2].ic, 56 * 56, false);
-    // skip connection, no change
-    matadd(x, x2, conv2.oc * 56 * 56);
-    relu(x, conv2.oc * 56 * 56);
-    matcopy(x2, x, conv2.oc * 56 * 56);
+    // block 1.1 and 1.2
+    for (int i = 1; i < 4; i += 2) {
+        im2col_cpu(x3, x, &h, &w, conv_config[i]);
+        matmul_conv(x, x3, p, conv_config[i], h * w, false, false);
+        batchnorm(x3, x, p + bn_config[i].offset, bn_config[i].ic, h * w, true);
+        im2col_cpu(x, x3, &h, &w, conv_config[i + 1]);
+        matmul_conv(x3, x, p, conv_config[i + 1], h * w, false, false);
+        batchnorm(x, x3, p + bn_config[i + 1].offset, bn_config[i + 1].ic, h * w, false);
+        // skip connection, no change
+        matadd(x, x2, conv_config[i + 1].oc * h * w);
+        relu(x, conv_config[i + 1].oc * h * w);
+        matcopy(x2, x, conv_config[i + 1].oc * h * w);
+    }
 
-    // block 2
-    im2col_cpu(x3, x, 56, 56, conv3);
-    matmul_conv(x, x3, p, conv3, 56 * 56, false, false);
-    batchnorm(x3, x, p + bn_config[3].offset, bn_config[3].ic, 56 * 56, true);
-    im2col_cpu(x, x3, 56, 56, conv4);
-    matmul_conv(x3, x, p, conv4, 56 * 56, false, false);
-    batchnorm(x, x3, p + bn_config[4].offset, bn_config[4].ic, 56 * 56, false);
-    // skip connection, no change
-    matadd(x, x2, conv4.oc * 56 * 56);
-    relu(x, conv4.oc * 56 * 56);
-    matcopy(x2, x, conv4.oc * 56 * 56);
+    // block 2-4
+    for (int i = 5; i < 16; i += 5) {
+        // block i.1
+        h_prev = h;
+        w_prev = w;
+        im2col_cpu(x3, x, &h, &w, conv_config[i]);
+        matmul_conv(x, x3, p, conv_config[i], h * w, false, false);
+        batchnorm(x3, x, p + bn_config[i].offset, bn_config[i].ic, h * w, true);
+        im2col_cpu(x, x3, &h, &w, conv_config[i + 1]);
+        matmul_conv(x3, x, p, conv_config[i + 1], h * w, false, false);
+        batchnorm(x, x3, p + bn_config[i + 1].offset, bn_config[i + 1].ic, h * w, false);
 
-    // block 3
-    im2col_cpu(x4, x, 56, 56, conv5);
-    matmul_conv(x, x4, p, conv5, 28 * 28, false, false);
-    batchnorm(x4, x, p + bn_config[5].offset, bn_config[5].ic, 28 * 28, true);
-    im2col_cpu(x, x4, 28, 28, conv6);
-    matmul_conv(x4, x, p, conv6, 28 * 28, false, false);
-    batchnorm(x, x4, p + bn_config[6].offset, bn_config[6].ic, 28 * 28, false);
+        // skip connection, change in stride
+        im2col_cpu(x3, x2, &h_prev, &w_prev, conv_config[i + 2]);
+        matmul_conv(x2, x3, p, conv_config[i + 2], h * w, false, false);
+        batchnorm(x3, x2, p + bn_config[i + 2].offset, bn_config[i + 2].ic, h * w, false);
+        matadd(x, x3, conv_config[i + 2].oc * h * w);
+        relu(x, conv_config[i + 2].oc * h * w);
+        matcopy(x2, x, conv_config[i + 2].oc * h * w);
 
-    // skip connection, change in stride
-    im2col_cpu(x4, x2, 56, 56, conv7);
-    matmul_conv(x2, x4, p, conv7, 28 * 28, false, false);
-    batchnorm(x4, x2, p + bn_config[7].offset, bn_config[7].ic, 28 * 28, false);
-    matadd(x, x4, conv7.oc * 28 * 28);
-    relu(x, conv7.oc * 28 * 28);
-    matcopy(x2, x, conv7.oc * 28 * 28);
-
-    // block 4
-    im2col_cpu(x4, x, 28, 28, conv8);
-    matmul_conv(x, x4, p, conv8, 28 * 28, false, false);
-    batchnorm(x4, x, p + bn_config[8].offset, bn_config[8].ic, 28 * 28, true);
-    im2col_cpu(x, x4, 28, 28, conv9);
-    matmul_conv(x4, x, p, conv9, 28 * 28, false, false);
-    batchnorm(x, x4, p + bn_config[9].offset, bn_config[9].ic, 28 * 28, false);
-    // skip connection, no change
-    matadd(x, x2, conv9.oc * 28 * 28);
-    relu(x, conv9.oc * 28 * 28);
-    matcopy(x2, x, conv9.oc * 28 * 28);
-
-    // block 5
-    im2col_cpu(x5, x, 28, 28, conv10);
-    matmul_conv(x, x5, p, conv10, 14 * 14, false, false);
-    batchnorm(x5, x, p + bn_config[10].offset, bn_config[10].ic, 14 * 14, true);
-    im2col_cpu(x, x5, 14, 14, conv11);
-    matmul_conv(x5, x, p, conv11, 14 * 14, false, false);
-    batchnorm(x, x5, p + bn_config[11].offset, bn_config[11].ic, 14 * 14, false);
-    // skip connection, change in stride
-    im2col_cpu(x5, x2, 28, 28, conv12);
-    matmul_conv(x2, x5, p, conv12, 14 * 14, false, false);
-    batchnorm(x5, x2, p + bn_config[12].offset, bn_config[12].ic, 14 * 14, false);
-    matadd(x, x5, conv12.oc * 14 * 14);
-    relu(x, conv12.oc * 14 * 14);
-    matcopy(x2, x, conv12.oc * 14 * 14);
-
-    // block 6
-    im2col_cpu(x5, x, 14, 14, conv13);
-    matmul_conv(x, x5, p, conv13, 14 * 14, false, false);
-    batchnorm(x5, x, p + bn_config[13].offset, bn_config[13].ic, 14 * 14, true);
-    im2col_cpu(x, x5, 14, 14, conv14);
-    matmul_conv(x5, x, p, conv14, 14 * 14, false, false);
-    batchnorm(x, x5, p + bn_config[14].offset, bn_config[14].ic, 14 * 14, false);
-    // skip connection, no change
-    matadd(x, x2, conv14.oc * 14 * 14);
-    relu(x, conv14.oc * 14 * 14);
-    matcopy(x2, x, conv14.oc * 14 * 14);
-
-    // block 7
-    im2col_cpu(x6, x, 14, 14, conv15);
-    matmul_conv(x, x6, p, conv15, 7 * 7, false, false);
-    batchnorm(x6, x, p + bn_config[15].offset, bn_config[15].ic, 7 * 7, true);
-    im2col_cpu(x, x6, 7, 7, conv16);
-    matmul_conv(x6, x, p, conv16, 7 * 7, false, false);
-    batchnorm(x, x6, p + bn_config[16].offset, bn_config[16].ic, 7 * 7, false);
-    // skip connection, change in stride
-    im2col_cpu(x6, x2, 14, 14, conv17);
-    matmul_conv(x2, x6, p, conv17, 7 * 7, false, false);
-    batchnorm(x6, x2, p + bn_config[17].offset, bn_config[17].ic, 7 * 7, false);
-    matadd(x, x6, conv17.oc * 7 * 7);
-    relu(x, conv17.oc * 7 * 7);
-    matcopy(x2, x, conv17.oc * 7 * 7);
-
-    // block 8
-    im2col_cpu(x6, x, 7, 7, conv18);
-    matmul_conv(x, x6, p, conv18, 7 * 7, false, false);
-    batchnorm(x6, x, p + bn_config[18].offset, bn_config[18].ic, 7 * 7, true);
-    im2col_cpu(x, x6, 7, 7, conv19);
-    matmul_conv(x6, x, p, conv19, 7 * 7, false, false);
-    batchnorm(x, x6, p + bn_config[19].offset, bn_config[19].ic, 7 * 7, false);
-    // skip connection, no change
-    matadd(x, x2, conv19.oc * 7 * 7);
-    relu(x, conv19.oc * 7 * 7);
+        // block i.2
+        im2col_cpu(x3, x, &h, &w, conv_config[i + 3]);
+        matmul_conv(x, x3, p, conv_config[i + 3], h * w, false, false);
+        batchnorm(x3, x, p + bn_config[i + 3].offset, bn_config[i + 3].ic, h * w, true);
+        im2col_cpu(x, x3, &h, &w, conv_config[i + 4]);
+        matmul_conv(x3, x, p, conv_config[i + 4], h * w, false, false);
+        batchnorm(x, x3, p + bn_config[i + 4].offset, bn_config[i + 4].ic, h * w, false);
+        // skip connection, no change
+        matadd(x, x2, conv_config[i + 4].oc * h * w);
+        relu(x, conv_config[i + 4].oc * h * w);
+        // the final block output doesn't need to be copied
+        if (i < 11) {
+            matcopy(x2, x, conv_config[i + 4].oc * h * w);
+        }
+    }
 
     // global average pooling
-    avgpool(x2, x, 7, 7, conv19.oc, 7, 1, 0);
+    avgpool(x2, x, &h, &w, conv_config[19].oc, h, 1, 0);
     // linear layer
     linear(x, x2, p, linear_config[0], false);
     softmax(x, linear_config[0].out);
@@ -591,7 +513,7 @@ int main(int argc, char** argv) {
         image_path = argv[i];
         // read input image, its height and width
         read_imagenette_image(image_path, &image, &input_height, &input_width);
-        // resize image to 224 x 224
+        // resize image to 224 x 224, bilinear interpolation or center crop
         // bilinear_interpolation(&resized_image, image, input_height, input_width);
         center_crop(&resized_image, image, input_height, input_width);
         forward(&model, resized_image); // output (nclass,) is stored in model.state.x
