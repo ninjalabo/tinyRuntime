@@ -1,28 +1,19 @@
 # Don't edit this file! This was automatically generated from "model.ipynb".
 
 import torch
-from torch import nn
+import torch.nn as nn
+import torchvision
+import torchvision.models as models
+from torchvision.models import ResNet18_Weights
 
 class Model(nn.Module):
-    def __init__(self):
+    def __init__(self, num_classes=10):
         super(Model, self).__init__()
-        self.nclasses = 10
-
-        self.conv1 = nn.Conv2d(1, 4, kernel_size=3, padding=1)
-        self.conv2 = nn.Conv2d(4, 8, kernel_size=3, padding=1)
-        self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
-
-        self.flatten = nn.Flatten()
-        self.fc1 = nn.Linear(8*7*7, 128)
-        self.fc2 = nn.Linear(128, self.nclasses)
-        self.relu = nn.ReLU()
+        self.model = models.resnet18(weights=ResNet18_Weights.IMAGENET1K_V1)
+        # swap the output layer and freeze all other layers
+        for p in self.model.parameters():
+          p.requires_grad = False
+        self.model.fc = nn.Linear(self.model.fc.in_features, num_classes)
         
     def forward(self, x):
-        x = self.relu(self.conv1(x))
-        x = self.pool(x)
-        x = self.pool(self.relu(self.conv2(x)))
-        x = self.flatten(x)
-        x = self.relu(self.fc1(x))
-        x = self.fc2(x)
-
-        return x
+        return self.model(x)
