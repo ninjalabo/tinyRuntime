@@ -43,6 +43,14 @@ jobs:
         run: |
           pytest
 
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        if: always()  # Ensure artifacts are uploaded even if pytest fails
+        with:
+          name: upload_files_linux
+          path: |
+            test_outputs/
+
   macOS-latest-make:
     runs-on: macos-latest
 
@@ -75,3 +83,11 @@ jobs:
       - name: Run Tests
         run: |
           pytest
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        if: always()  # Ensure artifacts are uploaded even if pytest fails
+        with:
+          name: upload_files_mac
+          path: |
+            test_outputs/
