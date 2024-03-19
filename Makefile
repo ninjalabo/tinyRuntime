@@ -15,4 +15,8 @@ py:
 	for x in $(cached_ipynb); do ./nbexport $$x; done
 	git add $(pyfiles)
 
-.PHONY: clean compile py
+nbchk:
+	rm -f *.nbconvert.ipynb
+	for x in $(filter-out train.ipynb prep.ipynb, $(wildcard *.ipynb)); do jupyter nbconvert --execute --to notebook $$x; done
+
+.PHONY: clean compile py nbchk

@@ -1,3 +1,4 @@
+*.nbconvert.ipynb
 .DS_Store
 .vscode
 data/imagenette2
