@@ -11,7 +11,7 @@ import numpy as np
 import torch
 import struct
 
-from export import export_modelq8
+from export import export_model, export_modelq8
 
 file_path = "test/data/imagenette2/val_transformed/0/113"
 
@@ -39,6 +39,7 @@ def execute(command):
 def test_runfiles(quantized=True, file_path=file_path):
     """ test run.c and runq.c works with an acceptable tolerance """
     # run vanilla model in test mode
+    export_model()
     command = ["./run", "model.bin", file_path]
     res = execute(command)
     assert np.allclose(res, ref, atol=1e-5, rtol=0), "run.c: Probabilities are not close."
