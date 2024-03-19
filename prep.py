@@ -2,6 +2,7 @@
 
 import os
 import shutil
+import random
 import torchvision
 from torchvision.datasets.utils import download_and_extract_archive
 import torchvision.transforms as transforms
@@ -40,7 +41,9 @@ print("Done")
 # create directory containing the subset of `val_transformed`
 src = "data/imagenette2/val_transformed"
 dst = "data/imagenette2/val_transformed_subset"
-os.makedirs(dest, exist_ok=True)
+if os.path.exists:
+    shutil.rmtree(dst)
+os.makedirs(dst)
 seed = 4
 nsamples = 10
 
