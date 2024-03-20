@@ -41,7 +41,7 @@ print("Done")
 # create directory containing the subset of `val_transformed`
 src = "data/imagenette2/val_transformed"
 dst = "data/imagenette2/val_transformed_subset"
-if os.path.exists:
+if os.path.exists(dst):
     shutil.rmtree(dst)
 os.makedirs(dst)
 seed = 4
