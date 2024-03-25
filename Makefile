@@ -3,8 +3,8 @@
 CC = gcc
 
 compile: 
-	$(CC) -Os -Wall run.c -lm -o run
-	$(CC) -Os -Wall runq.c -lm -o runq
+	$(CC) -Os -Wall run.c  func.c -lm -o run
+	$(CC) -Os -Wall runq.c func.c -lm -o runq
 
 clean:
 	rm -f run runq
@@ -19,4 +19,11 @@ nbchk:
 	rm -f *.nbconvert.ipynb
 	for x in $(filter-out train.ipynb prep.ipynb, $(wildcard *.ipynb)); do jupyter nbconvert --execute --to notebook $$x; done
 
-.PHONY: clean compile py nbchk
+
+CPPUTEST_HOME ?= /usr
+CPPUTESTS = func.c test_func.c
+ut: utmain.c $(CPPUTESTS)
+	$(CXX) -o $@ utmain.c $(CPPUTESTS) $(LDFLAGS) -lCppUTest -lCppUTestExt
+
+.PHONY: clean compile py nbchk ut
+
