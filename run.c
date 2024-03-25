@@ -2,20 +2,19 @@
 
 #include <stdio.h>
 #include <stdlib.h>
-#include <ctype.h>
-#include <time.h>
 #include <math.h>
-#include <string.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/mman.h>
-#include <stdint.h>
-#include <dirent.h>
-#include <sys/stat.h>
+#include <stdbool.h>
+#include <string.h>
 
 #include "func.h"
 
-#define IMAGE_SZ (28*28)
+#define IMAGE_SZ (3 * 224 * 224)	// model input image size (all images are resized to this)
+#define IM2COL_MAX_SZ (3 * 49 * 112 * 112)	// maximum array size after im2col
+#define IM2COL_SECOND_MAX_SZ (64 * 9 * 56 * 56)	// second maximum array size after im2col
+#define OUTPUT_MAX_SZ (64 * 112 * 112)	// maximum output size of layers during forward pass
 
 typedef struct {
 	int nclasses;		// the number of classes
@@ -24,29 +23,32 @@ typedef struct {
 } ModelConfig;
 
 typedef struct {
-	int in;			// input dimension
-	int out;		// output dimension
-	int offset;		// the position of the layer parameters in the "parameters" array within the "Model" struct
-} LinearConfig;
-
-typedef struct {
 	int ksize;		// kernel size
 	int stride;
 	int pad;		// padding
 	int ic;			// input channels
 	int oc;			// output channels
 	int offset;		// the position of the layer parameters in the "parameters" array within the "Model" struct
+	int bias;		// if layer has bias the value equals to 1 else 0
 } ConvConfig;
 
 typedef struct {
-	float *x;		// buffer to store the output of a layer (9*28*28,)
-	float *x2;		// buffer to store the output of a layer (4*28*28,)
+	int in;			// input dimension
+	int out;		// output dimension
+	int offset;		// the position of the layer parameters in the "parameters" array within the "Model" struct
+	int bias;		// if layer has bias the value equals to 1 else 0
+} LinearConfig;
+
+typedef struct {
+	float *x;		// buffer to store the input (28*28,)
+	float *x2;		// buffer to store the output of a layer (25*28*28,)
+	float *x3;		// buffer to store the output of a layer (9*28*28,)
 } Runstate;
 
 typedef struct {
 	ModelConfig model_config;
-	LinearConfig *linear_config;	// linear layers' config
 	ConvConfig *conv_config;	// convolutional layers' config
+	LinearConfig *linear_config;	// linear layers' config
 	float *parameters;	// array of all weigths and biases
 	Runstate state;		// the current state in the forward pass
 	int fd;			// file descriptor for memory mapping
@@ -56,28 +58,29 @@ typedef struct {
 
 static void malloc_run_state(Runstate * s)
 {
-	s->x = calloc(9 * 28 * 28, sizeof(float));
-	s->x2 = calloc(4 * 28 * 28, sizeof(float));
+	s->x = calloc(IM2COL_MAX_SZ, sizeof(float));
+	s->x2 = calloc(OUTPUT_MAX_SZ, sizeof(float));
+	s->x3 = calloc(IM2COL_SECOND_MAX_SZ, sizeof(float));
 }
 
 static void free_run_state(Runstate * s)
 {
 	free(s->x);
 	free(s->x2);
+	free(s->x3);
 }
 
-static void read_checkpoint(char *path, ModelConfig * config, ConvConfig ** cl,
-		     LinearConfig ** ll, float **parameters, int *fd,
-		     float **data, size_t *file_size)
+static void read_checkpoint(char *path, ModelConfig * mc, ConvConfig ** cc,
+			    LinearConfig ** lc, float **parameters, int *fd,
+			    float **data, size_t *file_size)
 {
-	// The data inside the file should follow the order: ModelConfig -> ConvConfig -> LinearConfig -> parameters (first CNN parameters then FC parameters)
 	FILE *file = fopen(path, "rb");
 	if (!file) {
 		fprintf(stderr, "Couldn't open file %s\n", path);
 		exit(EXIT_FAILURE);
 	}
 	// read model config
-	if (fread(config, sizeof(ModelConfig), 1, file) != 1) {
+	if (fread(mc, sizeof(ModelConfig), 1, file) != 1) {
 		exit(EXIT_FAILURE);
 	}
 	// figure out the file size
@@ -95,16 +98,10 @@ static void read_checkpoint(char *path, ModelConfig * config, ConvConfig ** cl,
 		fprintf(stderr, "mmap failed!\n");
 		exit(EXIT_FAILURE);
 	}
-	*cl = (ConvConfig *) (*data + sizeof(ModelConfig) / sizeof(float));
-	*ll =
-	    (LinearConfig *) (*data +
-			      (config->nconv * sizeof(ConvConfig) +
-			       sizeof(ModelConfig)) / sizeof(float));
+	*cc = (ConvConfig *) (*data + sizeof(ModelConfig) / sizeof(float));
+	*lc = (LinearConfig *) (*cc + mc->nconv);
 	// memory map weights and biases
-	int header_size =
-	    sizeof(ModelConfig) + config->nconv * sizeof(ConvConfig) +
-	    config->nlinear * sizeof(LinearConfig);
-	*parameters = *data + header_size / sizeof(float);	// position the parameters pointer to the start of the parameter data
+	*parameters = (float *)(*lc + mc->nlinear);	// position the pointer to the start of the parameter data
 }
 
 static void build_model(Model * m, char *checkpoint_path)
@@ -130,60 +127,48 @@ static void free_model(Model * m)
 	free_run_state(&m->state);
 }
 
-static void linear(float *xout, float *x, float *p, int in, int out)
+static void linear(float *xout, float *x, float *p, LinearConfig lc, bool relu)
 {
-	// linear layer: w(out,in) @ x (in,) + b(out,) -> xout (out,)
-	// by far the most amount of time is spent inside this little function
-	int i;
-	float *w = p;
-	float *b = p + in * out;
-	//#pragma omp parallel for private(i)
-	for (i = 0; i < out; i++) {
+	// w(out,in) @ x (in,) + b(out,) -> xout (out,)
+	int in = lc.in;
+	int out = lc.out;
+
+	float *w = p + lc.offset;
+	float *b = w + in * out;
+	for (int i = 0; i < out; i++) {
 		float val = 0.0f;
 		for (int j = 0; j < in; j++) {
 			val += w[i * in + j] * x[j];
 		}
-		xout[i] = val + b[i];
+		float bias_val = lc.bias ? b[i] : 0.0f;
+		xout[i] = (relu) ? fmax(val + bias_val, 0.0f) : val + bias_val;
 	}
 }
 
-static void linear_with_relu(float *xout, float *x, float *p, int in, int out)
+static void matmul_conv(float *xout, float *x, float *p, ConvConfig cc, int out,
+			bool relu)
 {
-	// linear layer with ReLU activation: w(out,in) @ x (in,) + b(out,) -> xout (out,)
-	int i;
-	float *w = p;
-	float *b = p + in * out;
-	//#pragma omp parallel for private(i)
-	for (i = 0; i < out; i++) {
-		float val = 0.0f;
-		for (int j = 0; j < in; j++) {
-			val += w[i * in + j] * x[j];
-		}
-		xout[i] = fmax(val + b[i], 0.0f);
-	}
-}
+	// w (nchannels,1,in) @ x (1,in,out) + b(nchannels,) -> xout (nchannels,out)
+	int nchannels = cc.oc;
+	int in = cc.ic * cc.ksize * cc.ksize;
 
-static void matmul_conv_with_relu(float *xout, float *x, float *p, int nchannels,
-			   int in, int out)
-{
-	// w (nchannels,1,in) @ x (1,in,out) + b(chan,) -> xout (nchannels,out)
-	int c;
-	float *w = p;
-	float *b = p + nchannels * in;
-	//#pragma omp parallel for private(c)
-	for (c = 0; c < nchannels; c++) {
+	float *w = p + cc.offset;
+	float *b = w + nchannels * in;
+	for (int c = 0; c < nchannels; c++) {
 		for (int i = 0; i < out; i++) {
 			float val = 0.0f;
 			for (int j = 0; j < in; j++) {
 				val += w[c * in + j] * x[j * out + i];
 			}
-			xout[c * out + i] = fmax(val + b[c], 0.0f);
+			float bias_val = cc.bias ? b[c] : 0.0f;
+			xout[c * out + i] =
+			    relu ? fmax(val + bias_val, 0.0f) : val + bias_val;
 		}
 	}
 }
 
-static float im2col_get_pixel(float *im, int height, int width, int row, int col,
-		       int channel, int pad)
+static float im2col_get_pixel(float *im, int height, int width, int row,
+			      int col, int channel, int pad)
 {
 	row -= pad;
 	col -= pad;
@@ -192,77 +177,134 @@ static float im2col_get_pixel(float *im, int height, int width, int row, int col
 	return im[col + width * (row + height * channel)];
 }
 
-static void im2col_cpu(float *col, float *im, int nchannels, int height, int width,
-		int ksize, int stride, int pad)
+static void im2col_cpu(float *col, float *im, int *height, int *width,
+		       ConvConfig cc)
 {
 	// im (nchannels, height, width) -> col (col_size, out_height * out_width)
-	int c, h, w;
-	int out_height = (height + 2 * pad - ksize) / stride + 1;
-	int out_width = (width + 2 * pad - ksize) / stride + 1;
+	int nchannels = cc.ic;
+	int ksize = cc.ksize;
+	int stride = cc.stride;
+	int pad = cc.pad;
+
+	int out_height = (*height + 2 * pad - ksize) / stride + 1;
+	int out_width = (*width + 2 * pad - ksize) / stride + 1;
 
 	int col_size = nchannels * ksize * ksize;
-	for (c = 0; c < col_size; c++) {
+	for (int c = 0; c < col_size; c++) {
 		int w_offset = c % ksize;
 		int h_offset = (c / ksize) % ksize;
 		int channel = c / ksize / ksize;
-		for (h = 0; h < out_height; h++) {
-			for (w = 0; w < out_width; w++) {
+		for (int h = 0; h < out_height; h++) {
+			for (int w = 0; w < out_width; w++) {
 				int input_row = h_offset + h * stride;
 				int input_col = w_offset + w * stride;
 				int col_index =
 				    (c * out_height + h) * out_width + w;
 				col[col_index] =
-				    im2col_get_pixel(im, height, width,
+				    im2col_get_pixel(im, *height, *width,
 						     input_row, input_col,
 						     channel, pad);
 			}
 		}
 	}
+	// update current height and width
+	*height = out_height;
+	*width = out_width;
 }
 
-static void maxpool(float *x, int height, int width, int nchannels, int ksize)
+typedef float (*PoolOperation)(float, float);
+
+static inline float get_max(float inp, float val)
 {
-	int out_height = height / ksize;
-	int out_width = width / ksize;
-	for (int c = 0; c < nchannels; c++) {
-		int xout_idx = c * out_height * out_width;	// start index for x
-		for (int i = 0; i < out_height; i++) {
-			for (int j = 0; j < out_width; j++) {
-				float cmax = 0;
-				int x_idx = c * height * width + 2 * (i * width + j);	// start index for x
-				for (int ki = 0; ki < ksize; ki++) {
-					for (int kj = 0; kj < ksize; kj++) {
-						cmax =
-						    fmax(cmax,
-							 x[x_idx + ki * width +
-							   kj]);
-					}
-				}
-				x[xout_idx + i * out_width + j] = cmax;
-			}
+	return fmax(inp, val);
+}
+
+static inline float add(float inp, float val)
+{
+	return val + inp;
+}
+
+static inline float operate_pool(float *x, int height, int width, int ksize,
+			   int in_start_row, int in_start_col, PoolOperation op,
+			   int c)
+{
+	float val = 0.0f;
+	for (int k = 0; k < ksize * ksize; k++) {
+		int in_row = in_start_row + k / ksize;
+		int in_col = in_start_col + k % ksize;
+		if (in_row >= 0 && in_row < height && in_col >= 0
+		    && in_col < width) {
+			float inp =
+			    x[c * height * width + in_row * width + in_col];
+			val = op(inp, val);
 		}
 	}
+	return val;
 }
 
-static void normalize(float *xout, uint8_t * image)
+static void pool(float *xout, float *x, int *height, int *width, int nchannels,
+		 int ksize, int stride, int pad, PoolOperation op)
 {
-	// normalize values [0, 255] -> [-1, 1]
-	for (int i = 0; i < IMAGE_SZ; i++) {
-		xout[i] = ((float)image[i] / 255 - 0.5) / 0.5;
+	int out_height = (*height + 2 * pad - ksize) / stride + 1;
+	int out_width = (*width + 2 * pad - ksize) / stride + 1;
+	int out_size = out_height * out_width;
+
+	for (int c = 0; c < nchannels; c++) {
+		for (int pixel = 0; pixel < out_size; pixel++) {
+			int out_row = pixel / out_width;
+			int out_col = pixel % out_width;
+			int in_start_row = out_row * stride - pad;
+			int in_start_col = out_col * stride - pad;
+
+			float val =
+			    operate_pool(x, *height, *width, ksize,
+					 in_start_row, in_start_col, op, c);
+			xout[c * out_size + pixel] = val;
+		}
+	}
+	*height = out_height;
+	*width = out_width;
+}
+
+static void maxpool(float *xout, float *x, int *height, int *width,
+		    int nchannels, int ksize, int stride, int pad)
+{
+	pool(xout, x, height, width, nchannels, ksize, stride, pad, get_max);
+}
+
+static void avgpool(float *xout, float *x, int *height, int *width,
+		    int nchannels, int ksize, int stride, int pad)
+{
+	pool(xout, x, height, width, nchannels, ksize, stride, pad, add);
+	for (int i = 0; i < nchannels * (*height) * (*width); i++) {
+		xout[i] /= ksize * ksize;
 	}
 }
 
-static void read_mnist_image(char *path, uint8_t * image)
+static void matadd(float *x, float *y, int size)
 {
-	size_t bytes;
+	for (int i = 0; i < size; i++) {
+		x[i] = x[i] + y[i];
+	}
+}
+
+static void relu(float *x, int size)
+{
+	// apply ReLU (Rectified Linear Unit) activation
+	for (int i = 0; i < size; i++) {
+		x[i] = fmax(0.0f, x[i]);
+	}
+}
+
+static void read_imagenette_image(char *path, float **image)
+{
 	FILE *file = fopen(path, "rb");
 	if (!file) {
-		perror("Error opening file");
+		fprintf(stderr, "Couldn't open file %s\n", path);
 		exit(EXIT_FAILURE);
 	}
-	bytes = fread(image, sizeof(uint8_t), IMAGE_SZ, file);
-	if (!bytes) {
-		perror("Error reading file");
+	if (fread(*image, sizeof(float), IMAGE_SZ, file) != IMAGE_SZ) {
+		printf("Image read failed");
 		exit(EXIT_FAILURE);
 	}
 	fclose(file);
@@ -272,36 +314,79 @@ static void read_mnist_image(char *path, uint8_t * image)
 // sanity check function for writing tensors, e.g., it can be used to evaluate values after a specific layer.
 static void write_tensor(float *x, int size)
 {
-	FILE *f = fopen("tensor.txt", "w");
+	FILE *f = fopen("test1.txt", "w");
 	for (int i = 0; i < size; i++)
 		fprintf(f, "%f\n", x[i]);
 	fclose(f);
 }
 #endif
 
-static void forward(Model * m, uint8_t * image)
+static void forward(Model * m, float *image)
 {
-	ConvConfig *cl = m->conv_config;
-	LinearConfig *ll = m->linear_config;
+	ConvConfig *cc = m->conv_config;
+	LinearConfig *lc = m->linear_config;
 	float *p = m->parameters;
 	Runstate *s = &m->state;
 	float *x = s->x;
 	float *x2 = s->x2;
+	float *x3 = s->x3;
 
-	normalize(x2, image);
-	im2col_cpu(x, x2, cl[0].ic, 28, 28, cl[0].ksize, cl[0].stride,
-		   cl[0].pad);
-	matmul_conv_with_relu(x2, x, p + cl[0].offset, cl[0].oc,
-			      cl[0].ic * cl[0].ksize * cl[0].ksize, 28 * 28);
-	maxpool(x2, 28, 28, cl[0].oc, 2);
-	im2col_cpu(x, x2, cl[1].ic, 14, 14, cl[1].ksize, cl[1].stride,
-		   cl[1].pad);
-	matmul_conv_with_relu(x2, x, p + cl[1].offset, cl[1].oc,
-			      cl[1].ic * cl[1].ksize * cl[1].ksize, 14 * 14);
-	maxpool(x2, 14, 14, cl[1].oc, 2);
-	linear_with_relu(x, x2, p + ll[0].offset, ll[0].in, ll[0].out);
-	linear(x2, x, p + ll[1].offset, ll[1].in, ll[1].out);
-	softmax(x2, ll[1].out);
+	int h = 224;		// height
+	int w = 224;		// width
+	int h_prev;		// buffer to store previous height for skip connection
+	int w_prev;		// buffer to store previous width for skip connection
+
+	im2col_cpu(x, image, &h, &w, cc[0]);
+	matmul_conv(x2, x, p, cc[0], h * w, true);
+	maxpool(x, x2, &h, &w, cc[0].oc, 3, 2, 1);
+	memcpy(x2, x, cc[0].oc * h * w * sizeof(float));
+
+	// block 1.1 and 1.2
+	for (int i = 1; i < 4; i += 2) {
+		im2col_cpu(x3, x, &h, &w, cc[i]);
+		matmul_conv(x, x3, p, cc[i], h * w, true);
+		im2col_cpu(x3, x, &h, &w, cc[i + 1]);
+		matmul_conv(x, x3, p, cc[i + 1], h * w, false);
+		// skip connection, no change
+		matadd(x, x2, cc[i + 1].oc * h * w);
+		relu(x, cc[i + 1].oc * h * w);
+		memcpy(x2, x, cc[i + 1].oc * h * w * sizeof(float));
+	}
+
+	// block 2-4
+	for (int i = 5; i < m->model_config.nconv - 4; i += 5) {
+		// block i.1
+		h_prev = h;
+		w_prev = w;
+
+		im2col_cpu(x3, x, &h, &w, cc[i]);
+		matmul_conv(x, x3, p, cc[i], h * w, true);
+		im2col_cpu(x3, x, &h, &w, cc[i + 1]);
+		matmul_conv(x, x3, p, cc[i + 1], h * w, false);
+		// skip connection, change in stride
+		im2col_cpu(x3, x2, &h_prev, &w_prev, cc[i + 2]);
+		matmul_conv(x2, x3, p, cc[i + 2], h * w, false);
+		matadd(x, x2, cc[i + 2].oc * h * w);
+		relu(x, cc[i + 2].oc * h * w);
+		memcpy(x2, x, cc[i + 2].oc * h * w * sizeof(float));
+
+		// block i.2
+		im2col_cpu(x3, x, &h, &w, cc[i + 3]);
+		matmul_conv(x, x3, p, cc[i + 3], h * w, true);
+		im2col_cpu(x3, x, &h, &w, cc[i + 4]);
+		matmul_conv(x, x3, p, cc[i + 4], h * w, false);
+		// skip connection, no change
+		matadd(x, x2, cc[i + 4].oc * h * w);
+		relu(x, cc[i + 4].oc * h * w);
+		// the final block output doesn't need to be copied
+		if (i < 11) {
+			memcpy(x2, x, cc[i + 4].oc * h * w * sizeof(float));
+		}
+	}
+
+	avgpool(x2, x, &h, &w, cc[m->model_config.nconv - 1].oc, h, 1, 0);
+	linear(x, x2, p, lc[0], false);
+	softmax(x, lc[0].out);
 }
 
 static void error_usage()
@@ -313,7 +398,6 @@ static void error_usage()
 
 int main(int argc, char **argv)
 {
-
 	char *model_path = NULL;
 	char *image_path = NULL;
 
@@ -321,16 +405,18 @@ int main(int argc, char **argv)
 	if (argc < 3) {
 		error_usage();
 	}
+
 	model_path = argv[1];
 	Model model;
 	build_model(&model, model_path);
-	uint8_t *image = malloc(IMAGE_SZ);
+	float *image = malloc(IMAGE_SZ * sizeof(float));
 	for (int i = 2; i < argc; i++) {
 		image_path = argv[i];
-		read_mnist_image(image_path, image);
-		forward(&model, image);	// output (nclasses,) is stored in model.state.x2
+		read_imagenette_image(image_path, &image);
+
+		forward(&model, image);	// output (nclass,) is stored in model.state.x
 		for (int j = 0; j < model.model_config.nclasses; j++) {
-			printf("%f\t", model.state.x2[j]);
+			printf("%f\t", model.state.x[j]);
 		}
 		printf("\n");
 	}
