@@ -4,60 +4,51 @@ import os
 import shutil
 import random
 import torchvision
-from torchvision.datasets.utils import download_and_extract_archive
+from torchvision.datasets.utils import download_and_extract_archive as __download_and_extract_archive
 import torchvision.transforms as transforms
 from torchvision.datasets import ImageFolder
-from torch.utils.data import DataLoader
 
 from export import serialize_fp32
 
-base = "data"
-os.makedirs(base, exist_ok=True)
+data_root = 'data'
+imagenette2_root = os.path.join(data_root, 'imagenette2')
 
-url = "https://s3.amazonaws.com/fast-ai-imageclas/imagenette2.tgz"
-download_and_extract_archive(url, download_root=base, extract_root=base)
+def download_and_extract_archive(root=data_root):
+    os.makedirs(root, exist_ok=True)
+    url = "https://s3.amazonaws.com/fast-ai-imageclas/imagenette2.tgz"
+    __download_and_extract_archive(url, download_root=root, extract_root=root)
 
-# resize images into (3, 224, 224) and normalize
-transform = transforms.Compose([transforms.Resize((224, 224)),
-                                transforms.ToTensor()])
-dataset = ImageFolder(root="data/imagenette2/val", transform=transform)
+def find_files(root:str=data_root, ext:str='jpeg') -> list[str]:
+    ext = '.' + ext if len(ext) else ''
+    l = [os.path.join(d, o) for d, _, files in os.walk(root) for o in files if o.lower().endswith(ext)]
+    return l
 
-# save transformed images to binary files
-dst = "data/imagenette2/val_transformed"
-os.makedirs(dst, exist_ok=True)
+dls = ImageFolder(os.path.join(imagenette2_root, 'val'),
+                  transform=transforms.Compose([transforms.Resize((224, 224)), transforms.ToTensor()]))
+val_tx_root = os.path.join(imagenette2_root, 'val_transformed')
 
-for i, (image, label) in enumerate(dataset):
-    if i % 500 == 0:
-        print(f"Wrote {i}/{len(dataset)}")
+import matplotlib.pyplot as plt
+import torch
+import struct
 
-    dsd = os.path.join(dst, str(int(label)))
-    os.makedirs(dsd, exist_ok=True)
-    df = os.path.join(dsd, str(i))
-    f = open(df, "wb")
-    serialize_fp32(f, image)
-    f.close()
-print("Done")
+def show_image(label, number):
+    path = os.path.join(val_tx_root, str(label), str(number))
+    with open(path, "rb") as f:
+        sizeof_float, nch, h, w = 4, 3, 224, 224
+        image = torch.tensor(struct.unpack("f"*(nch*h*w), f.read(sizeof_float*nch*h*w))).view(nch,h,w)
 
-# create directory containing the subset of `val_transformed`
-src = "data/imagenette2/val_transformed"
-dst = "data/imagenette2/val_transformed_subset"
-if os.path.exists(dst):
-    shutil.rmtree(dst)
-os.makedirs(dst)
-seed = 4
-nsamples = 10
+    # imshow accepts image shape (height, width, nch)
+    image_transposed = image.permute(1, 2, 0) 
+    plt.imshow(image_transposed)
+    print(f"Image shape (nch, h, w): {(nch, h, w)} {path}")
 
-for label in range(10):
-    ssd = os.path.join(src, str(label))
-    dsd = os.path.join(dst, str(label))
-    os.makedirs(dsd, exist_ok=True)
-
-    # shuffle image files
-    files = os.listdir(ssd)
-    random.Random(seed).shuffle(files)
-
-    # copy 10 samples to `val_transformed_subset`
-    for f in files[:nsamples]:
-        sf = os.path.join(ssd, f)
-        df = os.path.join(dsd, f)
-        shutil.copy(sf, df)
+def sample_files(src, dst, n=10, seed=4):
+    """create directory containing the subset of `src`"""
+    shutil.rmtree(dst, ignore_errors=True)
+    subdirs = [o for o in os.listdir(src) if os.path.isdir(os.path.join(src, o))]
+    for o in subdirs:
+        files = os.listdir(os.path.join(src, o))
+        random.Random(seed).shuffle(files)
+        for f in files[:n]:
+            os.makedirs(os.path.join(dst, o), exist_ok=True)
+            shutil.copy(os.path.join(src, o, f), os.path.join(dst, o, f))
