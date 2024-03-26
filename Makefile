@@ -1,6 +1,8 @@
-# choose compiler, e.g. gcc/clang
-# example override to clang: make run CC=clang
-CC = gcc
+
+XCODESELECT := $(shell xcode-select -p 2>/dev/null)
+
+CC = $(if $(XCODESELECT),clang,gcc)
+CXX = $(if $(XCODESELECT),clang++,g++)
 
 compile: 
 	$(CC) -Os -Wall run.c  func.c -lm -o run
@@ -17,13 +19,15 @@ py:
 
 nbchk:
 	rm -f *.nbconvert.ipynb
-	for x in $(filter-out train.ipynb prep.ipynb, $(wildcard *.ipynb)); do jupyter nbconvert --execute --to notebook $$x; done
+	for x in $(filter-out train.ipynb prep.ipynb compare_all.ipynb, $(wildcard *.ipynb)); do jupyter nbconvert --execute --to notebook $$x; done
 
 
-CPPUTEST_HOME ?= /usr
+ifeq ($(CXX),clang++)
+    CPPUTEST_HOME += -L/opt/homebrew/opt/cpputest/lib -I/opt/homebrew/opt/cpputest/include
+endif
 CPPUTESTS = func.c test_func.c
 ut: utmain.c $(CPPUTESTS)
-	$(CXX) -o $@ utmain.c $(CPPUTESTS) $(LDFLAGS) -lCppUTest -lCppUTestExt
+	$(CXX) -o $@ utmain.c $(CPPUTESTS) $(LDFLAGS) $(CPPUTEST_HOME) -lCppUTest -lCppUTestExt
 
 .PHONY: clean compile py nbchk ut
 
