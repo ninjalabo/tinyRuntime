@@ -1,4 +1,5 @@
 #include "CppUTest/TestHarness.h"
+
 #include "func.h"
 
 #define TOL 0.00001
@@ -16,30 +17,41 @@ TEST_GROUP(TestGroup)
 TEST(TestGroup, Linear)
 {
         int in = 2, out = 2, offset = 1;
-        int gs_w = 2, gs_b = 2;
+        int gs_w = 18, gs_b = 2;
 
         float x[] = { 1.0f, 2.0f };
-        float p[] =
-            { 0.0f, 1.0f, 2.0f, 3.0f, 4.0f, 1.0f, 2.0f };
+        float p[] = { 0.0f, 1.0f, 2.0f, 3.0f, 4.0f, 1.0f, 2.0f };
         LinearConfig lc = { in, out, offset, 1 };
-
-        int8_t qx_q[] = { 64, 127 };
-        float qx_sf[] = { 2.0f / Q_MAX };
-        QuantizedTensor qx = { .q = qx_q, .s = qx_sf };
-        int8_t pq[] =  { 0, 64, 127, 95, 127, 64, 127};
-        float sf[] = { 0.0f, 2.0f / Q_MAX, 4.0f / Q_MAX, 2.0f / Q_MAX };
-        LinearConfigQ lcq = { in, out, offset, offset, gs_w, gs_b };
 
         float xout[out];
         linear(xout, x, p, lc);
 
+        DOUBLES_EQUAL(6.0, xout[0], TOL);
+        DOUBLES_EQUAL(13.0, xout[1], TOL);
+
+        in = 36;
+        int size_q = in * out + out + offset;
+        int size_s = in * out / gs_w + out / gs_b + offset;
+        int8_t qx_q[in];
+        float qx_sf[in / gs_w];
+        for (int i = 0; i < in; i++)
+                qx_q[i] = i / 9;
+        for (int i = 0; i < in / gs_w; i++)
+                qx_sf[i] = i + 1;
+        QuantizedTensor qx = {.q = qx_q,.s = qx_sf };
+        int8_t pq[size_q];
+        float sf[size_s];
+        for (int i = 0; i < size_q; i++)
+                pq[i] = (i - 1) / 9;
+        for (int i = 0; i < size_s; i++)
+                sf[i] = i;
+        LinearConfigQ lcq = { in, out, offset, offset, gs_w, gs_b };
+
         float xout_q[out];
         linear_q(xout_q, &qx, pq, sf, lcq);
 
-        DOUBLES_EQUAL(6.0, xout[0], TOL);
-        DOUBLES_EQUAL(13.0, xout[1], TOL);
-        DOUBLES_EQUAL(6.02368404737, xout_q[0], TOL);
-        DOUBLES_EQUAL(13.01568603137, xout_q[1], TOL);
+        DOUBLES_EQUAL(517.0, xout_q[0], TOL);
+        DOUBLES_EQUAL(2551.0, xout_q[1], TOL);
 }
 
 TEST(TestGroup, Im2col)
@@ -49,7 +61,7 @@ TEST(TestGroup, Im2col)
         int col_size = ksize * ksize * ic * h * w;
 
         float im[] = { 1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f };
-        ConvConfig cc = { ksize, stride, pad, ic, 0, 0, 0 }; // 0 doesn't affect
+        ConvConfig cc = { ksize, stride, pad, ic, 0, 0, 0 };	// 0 doesn't affect
         ConvConfigQ cc_q = { ksize, stride, pad, ic, 0, 0, 0, 0, 0 };
 
         float col[col_size];
@@ -58,16 +70,16 @@ TEST(TestGroup, Im2col)
         float col_q[col_size];
         im2col_q(col_q, im, cc_q, &hq, &wq);
 
-        float ref[] =
-            { 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 2.0f,
-            0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 1.0f, 0.0f, 3.0f,
-            1.0f, 2.0f, 3.0f, 4.0f, 2.0f, 0.0f, 4.0f, 0.0f,
-            0.0f, 3.0f, 0.0f, 0.0f, 3.0f, 4.0f, 0.0f, 0.0f,
-            4.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 5.0f,
-            0.0f, 0.0f, 5.0f, 6.0f, 0.0f, 0.0f, 6.0f, 0.0f,
-            0.0f, 5.0f, 0.0f, 7.0f, 5.0f, 6.0f, 7.0f, 8.0f,
-            6.0f, 0.0f, 8.0f, 0.0f, 0.0f, 7.0f, 0.0f, 0.0f,
-            7.0f, 8.0f, 0.0f, 0.0f, 8.0f, 0.0f, 0.0f, 0.0f };
+        float ref[] = {
+                0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 2.0f, 0.0f, 3.0f, 4.0f,
+                0.0f, 0.0f, 0.0f, 0.0f, 5.0f, 6.0f, 0.0f, 7.0f, 8.0f,
+                0.0f, 0.0f, 0.0f, 1.0f, 2.0f, 0.0f, 3.0f, 4.0f, 0.0f,
+                0.0f, 0.0f, 0.0f, 5.0f, 6.0f, 0.0f, 7.0f, 8.0f, 0.0f,
+                0.0f, 1.0f, 2.0f, 0.0f, 3.0f, 4.0f, 0.0f, 0.0f, 0.0f,
+                0.0f, 5.0f, 6.0f, 0.0f, 7.0f, 8.0f, 0.0f, 0.0f, 0.0f,
+                1.0f, 2.0f, 0.0f, 3.0f, 4.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+                5.0f, 6.0f, 0.0f, 7.0f, 8.0f, 0.0f, 0.0f, 0.0f, 0.0f
+        };
 
         MEMCMP_EQUAL(ref, col, col_size * sizeof(float));
         MEMCMP_EQUAL(ref, col_q, col_size * sizeof(float));
@@ -77,7 +89,7 @@ TEST(TestGroup, Conv)
 {
         int h = 1, w = 1;
         int ksize = 2, stride = 1, pad = 1, ic = 1, oc = 2;
-        int offset = 1, bias = 1, gs_w = 2, gs_b = 2;
+        int offset = 1, bias = 1, gs_w = 20, gs_b = 2;
 
         float x[] = { 1.0f, 2.0f, 3.0f, 4.0f };
         float p[] =
@@ -85,26 +97,37 @@ TEST(TestGroup, Conv)
             2.0f };
         ConvConfig cc = { ksize, stride, pad, ic, oc, offset, bias };
 
-        float qx_sf[] = { 2.0f / Q_MAX, 4.0f / Q_MAX };
-        int8_t qx_q[] = { 64, 127, 95, 127 };
-        QuantizedTensor qx = { .q = qx_q, .s = qx_sf };
-        int8_t pq[] =  { 0, 64, 127, 95, 127, 106, 127, 111, 127, 64, 127};
-        float sf[] =
-            { 0.0f, 2.0f / Q_MAX, 4.0f / Q_MAX, 6.0f / Q_MAX, 8.0f / Q_MAX,
-            2.0f / Q_MAX };
-        ConvConfigQ cc_q =
-            { ksize, stride, pad, ic, oc, offset, offset, gs_w, gs_b };
-
         float xout[oc * h * w];
         conv(xout, x, p, cc, h, w);
+
+        DOUBLES_EQUAL(31.0, xout[0], TOL);
+        DOUBLES_EQUAL(72.0, xout[1], TOL);
+
+        ic = 10;
+        int nrows = ksize * ksize * ic;
+        int size_q = nrows * oc + oc + offset;
+        int size_s = nrows * oc / gs_w + oc / gs_b + offset;
+        int8_t qx_q[nrows];
+        float qx_sf[nrows / gs_w];
+        for (int i = 0; i < nrows; i++)
+                qx_q[i] = i / 10;
+        for (int i = 0; i < nrows / gs_w; i++)
+                qx_sf[i] = i + 1;
+        QuantizedTensor qx = {.q = qx_q,.s = qx_sf };
+        int8_t pq[size_q];
+        float sf[size_s];
+        for (int i = 0; i < size_q; i++)
+                pq[i] = (i - 1) / 10;
+        for (int i = 0; i < size_s; i++)
+                sf[i] = i;
+        ConvConfigQ cc_q =
+            { ksize, stride, pad, ic, oc, offset, offset, gs_w, gs_b };
 
         float xout_q[oc * h * w];
         conv_q(xout_q, &qx, pq, sf, cc_q, h, w);
 
-        DOUBLES_EQUAL(31.0, xout[0], TOL);
-        DOUBLES_EQUAL(72.0, xout[1], TOL);
-        DOUBLES_EQUAL(30.976501953, xout_q[0], TOL);
-        DOUBLES_EQUAL(71.9686279373, xout_q[1], TOL);
+        DOUBLES_EQUAL(570.0, xout_q[0], TOL);
+        DOUBLES_EQUAL(2830.0, xout_q[1], TOL);
 }
 
 TEST(TestGroup, Batchnorm)
@@ -140,14 +163,14 @@ TEST(TestGroup, Pool)
         };
         int h, w;
         float xout[out_size];
-        void (*pool_functions[])(float*, float*, int*, int*, int, int, int,
+        void (*pool_functions[])(float *, float *, int *, int *, int, int, int,
                                  int) = { maxpool, avgpool };
 
         for (int i = 0; i < 2; i++) {
                 h = h_before;
                 w = w_before;
 
-                pool_functions[i](xout, x, &h, &w, nch, ksize, stride, pad);
+                pool_functions[i] (xout, x, &h, &w, nch, ksize, stride, pad);
                 DOUBLES_EQUAL(h_after, h, TOL);
                 DOUBLES_EQUAL(w_after, w, TOL);
 
@@ -187,11 +210,11 @@ TEST(TestGroup, Quantize)
         float x[] = { 1.0f, 2.0f, 3.0f, 4.0f };
         float ref_sf[] = { 2.0f / Q_MAX, 4.0f / Q_MAX };
         int8_t ref_q[] = { 64, 127, 95, 127 };
-        QuantizedTensor ref = { .q = ref_q, .s = ref_sf };
+        QuantizedTensor ref = {.q = ref_q,.s = ref_sf };
 
         int8_t qx_q[size];
         float qx_s[size / gs];
-        QuantizedTensor qx = { .q = qx_q, .s = qx_s };
+        QuantizedTensor qx = {.q = qx_q,.s = qx_s };
         quantize(&qx, x, size, gs);
 
         for (int i = 0; i < size / gs; i++) {
@@ -208,13 +231,13 @@ TEST(TestGroup, Quantize2d)
         float x[] = { 1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f };
         ConvConfigQ cc = { ksize, 0, 0, ic, 0, 0, 0, gs, 0 };
         float ref_sf[] =
-            { 3.0f / Q_MAX, 7.0f / Q_MAX, 4.0f / Q_MAX, 8.0f / Q_MAX};
-        int8_t ref_q[] = { 42, 64, 127, 127, 91, 95, 127, 127 };
-        QuantizedTensor ref = { .q = ref_q, .s = ref_sf };
+            { 2.0f / Q_MAX, 4.0f / Q_MAX, 6.0f / Q_MAX, 8.0f / Q_MAX };
+        int8_t ref_q[] = { 64, 127, 95, 127, 106, 127, 111, 127 };
+        QuantizedTensor ref = {.q = ref_q,.s = ref_sf };
 
         int8_t qx_q[size];
         float qx_s[size / gs];
-        QuantizedTensor qx = { .q = qx_q, .s = qx_s };
+        QuantizedTensor qx = {.q = qx_q,.s = qx_s };
         quantize2d(&qx, x, cc, ncols);
 
         for (int i = 0; i < size / gs; i++) {

@@ -22,8 +22,13 @@ jobs:
         id: depends
         run: |
           sudo apt-get update
-          sudo apt-get install build-essential -y
-          sudo apt-get install cpputest
+          sudo apt-get install -y build-essential libatlas-base-dev cpputest
+          git clone https://github.com/flame/blis.git
+          cd blis
+          ./configure -t openmp auto
+          make -j
+          sudo make install
+          sudo ldconfig
 
       - name: Set up Python 3.10
         uses: actions/setup-python@v5
@@ -35,17 +40,23 @@ jobs:
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
-      - name: Build
-        id: make_build
+      - name: Run original implementation
         run: |
-          make compile
           make ut
-
-      - name: Run Tests
-        run: |
-          make nbchk
+          make compile
           ./ut
           pytest
+
+      - name: Run BLIS implementation
+        run: |
+          make ut BLIS=1
+          make compile BLIS=1
+          ./ut
+          pytest
+
+      - name: Run Python notebooks
+        run: |
+          make nbchk
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
@@ -67,7 +78,10 @@ jobs:
         id: depends
         run: |
           brew update
-          brew install cpputest
+          find / -name "Library/Frameworks/Python.framework" | xargs rm -rf
+          brew install --force python3 && brew unlink python3 && brew unlink python3 && brew link --overwrite python3
+          brew install cpputest blis llvm libomp
+          export PATH="/usr/local/opt/llvm/bin:$PATH"
 
       - name: Set up Python 3.10
         uses: actions/setup-python@v5
@@ -78,18 +92,24 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          
-      - name: Build
-        id: make_build
-        run: |
-          make compile
-          make ut
 
-      - name: Run Tests
+      - name: Run original implementation
         run: |
-          make nbchk
+          make ut
+          make compile
           ./ut
           pytest
+
+      - name: Run BLIS implementation
+        run: |
+          make ut BLIS=1
+          make compile BLIS=1
+          ./ut
+          pytest
+
+      - name: Run Python notebooks
+        run: |
+          make nbchk
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
