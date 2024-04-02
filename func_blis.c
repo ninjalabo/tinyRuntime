@@ -1,25 +1,21 @@
-#include <math.h>
+#include <blis/blis.h>
 
 #include "properties.h"
-
-// avoid division by zero
-#define eps 0.00001f
 
 void linear(float *xout, float *x, float *p, LinearConfig lc)
 {
 	// w(nrows,ncols) @ x (ncols,) + b(nrows,) -> xout (nrows,)
 	int ncols = lc.in;
 	int nrows = lc.out;
-
 	float *w = p + lc.offset;
 	float *b = w + ncols * nrows;
-	for (int i = 0; i < nrows; i++) {
-		float val = 0.0f;
-		for (int j = 0; j < ncols; j++) {
-			val += w[i * ncols + j] * x[j];
-		}
-		float bias_val = lc.bias ? b[i] : 0.0f;
-		xout[i] = val + bias_val;
+
+	float alpha = 1.0f;
+	float beta = 0.0f;
+	bli_sgemv(BLIS_NO_TRANSPOSE, BLIS_NO_CONJUGATE, nrows, ncols, &alpha,
+		  w, ncols, 1, x, 1, &beta, xout, 1);
+	if (lc.bias) {
+		bli_saddv(BLIS_NO_CONJUGATE, nrows, b, 1, xout, 1);
 	}
 }
 
@@ -31,21 +27,19 @@ void conv(float *xout, float *x, float *p, ConvConfig cc, int height, int width)
 	int nrows = cc.ic * cc.ksize * cc.ksize;
 	float *w = p + cc.offset;
 	float *b = w + nchannels * nrows;
-	for (int c = 0; c < nchannels; c++) {
-		for (int i = 0; i < ncols; i++) {
-                        float val = 0.0f;
-			for (int j = 0; j < nrows; j++) {
-				val += w[c * nrows + j] * x[i * nrows + j];
-			}
-			float bias_val = cc.bias ? b[c] : 0.0f;
-			xout[c * ncols + i] = val + bias_val;
-		}
+
+	float alpha = 1.0f;
+	float beta = 0.0f;
+	bli_sgemm(BLIS_NO_TRANSPOSE, BLIS_NO_TRANSPOSE, nchannels, ncols, nrows,
+		  &alpha, w, nrows, 1, x, 1, nrows, &beta, xout, ncols, 1);
+	if (cc.bias) {
+		bli_saddm(0, BLIS_NONUNIT_DIAG, BLIS_DENSE, BLIS_NO_TRANSPOSE,
+			  nchannels, ncols, b, 1, 0, xout, ncols, 1);
 	}
 }
 
 void matadd(float *x, float *y, int size)
 {
-	for (int i = 0; i < size; i++) {
-		x[i] = x[i] + y[i];
-	}
+	float alpha = 1.0f;
+	bli_saxpyv(BLIS_NO_CONJUGATE, size, &alpha, y, 1, x, 1);
 }
