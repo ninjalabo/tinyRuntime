@@ -4,6 +4,7 @@
 Run simply with
 $ pytest
 """
+import pytest
 
 import os
 import subprocess
@@ -12,16 +13,21 @@ import torch
 import struct
 
 from export import export_model, export_modelq8
+from train import load
 
-file_path = "test/data/imagenette2/val_transformed/0/113"
+#this is predicted wrong on fastai resnet18
+#file_path = "test/data/imagenette2/val_transformed/0/113"
+file_path = "data/imagenette2/val_transformed/0/2"
 
-# calculate reference values using Python model
-model = torch.load("model.pt")
-with open(file_path, "rb") as f:
-    sizeof_float, nch, h, w = 4, 3, 224, 224
-    image = torch.tensor(struct.unpack("f"*(nch*h*w), f.read(sizeof_float*nch*h*w))).view(1,nch,h,w)
-    ref = model(image).detach()
-    ref = torch.nn.functional.softmax(ref, dim=1).view(-1).numpy() # python model output
+def calculate_reference_values(model_name, file_path):
+    # calculate reference values using Python model
+    model = load(model_name)
+    with open(file_path, "rb") as f:
+        sizeof_float, nch, h, w = 4, 3, 224, 224
+        image = torch.tensor(struct.unpack("f"*(nch*h*w), f.read(sizeof_float*nch*h*w))).view(1, nch,h,w)
+        ref = model(image).detach()
+        ref = torch.nn.functional.softmax(ref, dim=1).view(-1).numpy() # python model output
+    return ref
 
 def execute(command):
     d = "test_outputs"
@@ -36,10 +42,14 @@ def execute(command):
 
     return res
 
-def test_runfiles(quantized=True, file_path=file_path):
+@pytest.mark.parametrize("model_name", ["resnet18", "resnet34", "resnet50"])
+def test_runfiles(model_name, quantized=False, file_path=file_path):
     """ test run.c and runq.c works with an acceptable tolerance """
     # run vanilla model in test mode
-    export_model()
+    ref = calculate_reference_values(model_name, file_path="data/imagenette2/val_transformed/0/2")
+    export_model(model_name)
+    compile = [f'make compile_{model_name}']
+    subprocess.run(compile, shell=True)
     command = ["./run", "model.bin", file_path]
     res = execute(command)
     assert np.allclose(res, ref, atol=1e-5, rtol=0), "run.c: Probabilities are not close."

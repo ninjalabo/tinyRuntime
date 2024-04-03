@@ -3,6 +3,9 @@ XCODESELECT := $(shell xcode-select -p 2>/dev/null)
 
 CC = $(if $(XCODESELECT),clang,gcc)
 CXX = $(if $(XCODESELECT),clang++,g++)
+MODEL_FLAGS=
+
+all: compile
 
 CFLAGS := -Os -Wall
 LDFLAGS := -lm
@@ -19,8 +22,18 @@ SRC += $(if $(BLIS),func_blis.c,func.c)
 SRC += $(if $(filter arm,$(ARCH)),func_q_arm.c,func_q.c)
 
 compile: 
-	$(CC) $(CFLAGS) run.c $(SRC) -o run $(LDFLAGS)
+	$(CC) $(CFLAGS) $(MODEL_FLAGS) run.c $(SRC) -o run $(LDFLAGS)
 	$(CC) $(CFLAGS) runq.c $(SRC) -o runq $(LDFLAGS)
+
+compile_resnet18: 
+	@$(MAKE) MODEL_FLAGS=-DRESNET18
+
+compile_resnet34:
+	@$(MAKE) MODEL_FLAGS=-DRESNET34
+
+compile_resnet50:
+	@$(MAKE) MODEL_FLAGS=-DRESNET50 
+
 
 clean:
 	rm -f run runq
