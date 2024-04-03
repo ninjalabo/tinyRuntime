@@ -61,7 +61,6 @@ jobs:
 
       - name: Dependencies
         id: depends
-        continue-on-error: true
         run: |
           brew update
 
