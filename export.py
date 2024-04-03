@@ -4,6 +4,7 @@ import torch
 import struct
 import numpy as np
 from sympy import divisors
+from train import load
 
 def serialize_fp32(file, tensor):
     ''' Write one fp32 tensor to file that is open in wb mode '''
@@ -58,8 +59,7 @@ def fold_batchnorm(cnn, bn) :
     cnn.bias.data = b_fold
     
 
-
-def export_model(model_path="model.pt", file_path="model.bin"):
+def export_model(model_name="resnet18", file_path="model.bin"):
     '''
     Export the quantized model to a file
     The data inside the file follows this order:
@@ -67,18 +67,20 @@ def export_model(model_path="model.pt", file_path="model.bin"):
     2. CNN, FC and BN layers' configuration
     3. CNN, FC and BN layers' parameters
     '''
-    model = torch.load(model_path)
+    model = load(model_name)
     f = open(file_path, "wb")
     # write model config
     conv_layers = [layer for layer in model.modules() if isinstance(layer, torch.nn.Conv2d)]
     bn_layers = [layer for layer in model.modules() if isinstance(layer, torch.nn.BatchNorm2d)]
+    bn1_layers = [layer for layer in model.modules() if isinstance(layer, torch.nn.BatchNorm1d)]
     for conv_layer, bn_layer in zip(conv_layers, bn_layers):
         fold_batchnorm(conv_layer, bn_layer) # fold batchnorm layers into convolutional layers
     nconv = len(conv_layers)
+    nbn1 = len(bn1_layers)
     linear_layers = [layer for layer in model.modules() if isinstance(layer, torch.nn.Linear)]
     nlinear = len(linear_layers)
     nclasses = 10
-    header = struct.pack("3i", nclasses, nconv, nlinear)
+    header = struct.pack("4i", nclasses, nconv, nlinear, nbn1)
     f.write(header)
 
     # write layers' config
@@ -95,12 +97,24 @@ def export_model(model_path="model.pt", file_path="model.bin"):
     for l in linear_layers:
         bias = 1 if l.bias is not None else 0
         f.write(struct.pack("4i", l.in_features, l.out_features, offset, bias))
-        offset += l.in_features * l.out_features + bias * l.out_features
+        offset += l.in_features * l.out_features + bias * l.out_features    
+
+    for layer in bn1_layers:
+        f.write(struct.pack("2i", layer.num_features, offset))
+        # set offset to the start of next layer
+        # weight, bias, running_mean, running_var
+        offset += 4 * layer.num_features
           
     # write the weights and biases of the model
     for l in [*conv_layers, *linear_layers]:
         for p in l.parameters():
             serialize_fp32(f, p)
+    
+    for layer in bn1_layers:
+        for p in layer.parameters():
+            serialize_fp32(f, p)
+        serialize_fp32(f, layer.running_mean)
+        serialize_fp32(f, layer.running_var)
 
     f.close()
     print(f"wrote {file_path}")

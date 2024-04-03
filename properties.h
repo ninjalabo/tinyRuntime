@@ -7,6 +7,7 @@ typedef struct {
 	int nclasses;		// number of classes
 	int nconv;		// number of convolutional layers
 	int nlinear;		// number of linear layers
+  int nbn;		// number of batchnorm layers
 } ModelConfig;
 
 typedef struct {

@@ -25,6 +25,7 @@ typedef struct {
 	ModelConfig model_config;
 	ConvConfig *conv_config;	// convolutional layers' config
 	LinearConfig *linear_config;	// linear layers' config
+	BnConfig *bn_config;	// batchnorm layers' config
 	float *parameters;	// array of all weigths and biases
 	Runstate state;		// the current state in the forward pass
 	int fd;			// file descriptor for memory mapping
@@ -47,9 +48,10 @@ static void free_run_state(Runstate * s)
 }
 
 static void read_checkpoint(char *path, ModelConfig * mc, ConvConfig ** cc,
-			    LinearConfig ** lc, float **parameters, int *fd,
+			    LinearConfig ** lc, BnConfig ** bc, float **parameters, int *fd,
 			    float **data, size_t *file_size)
 {
+	// The data inside the file should follow the order: ModelConfig -> ConvConfig -> LinearConfig -> BnConfig -> parameters (first CNN parameters then FC parameters)
 	FILE *file = fopen(path, "rb");
 	if (!file) {
 		fprintf(stderr, "Couldn't open file %s\n", path);
@@ -76,15 +78,16 @@ static void read_checkpoint(char *path, ModelConfig * mc, ConvConfig ** cc,
 	}
 	*cc = (ConvConfig *) (*data + sizeof(ModelConfig) / sizeof(float));
 	*lc = (LinearConfig *) (*cc + mc->nconv);
+	*bc = (BnConfig *) (*lc + mc->nlinear);
 	// memory map weights and biases
-	*parameters = (float *)(*lc + mc->nlinear);	// position the pointer to the start of the parameter data
+	*parameters = (float *)(*bc + mc->nbn);	// position the pointer to the start of the parameter data
 }
 
 static void build_model(Model * m, char *checkpoint_path)
 {
 	// read in the Config and the Weights from the checkpoint
 	read_checkpoint(checkpoint_path, &m->model_config, &m->conv_config,
-			&m->linear_config, &m->parameters, &m->fd, &m->data,
+			&m->linear_config, &m->bn_config, &m->parameters, &m->fd, &m->data,
 			&m->file_size);
 	// allocate the RunState buffers
 	malloc_run_state(&m->state);
@@ -105,7 +108,7 @@ static void free_model(Model * m)
 
 static void read_imagenette_image(char *path, float **image)
 {
-	FILE *file = fopen(path, "rb");
+FILE *file = fopen(path, "rb");
 	if (!file) {
 		fprintf(stderr, "Couldn't open file %s\n", path);
 		exit(EXIT_FAILURE);
@@ -117,8 +120,9 @@ static void read_imagenette_image(char *path, float **image)
 	fclose(file);
 }
 
-#ifdef DEBUG
+
 // sanity check function for writing tensors, e.g., it can be used to evaluate values after a specific layer.
+#ifdef DEBUG
 static void write_tensor(float *x, int size)
 {
 	FILE *f = fopen("test1.txt", "w");
@@ -195,9 +199,17 @@ static void forward(Model * m, float *image)
 		}
 	}
 
-	avgpool(x2, x, &h, &w, cc[m->model_config.nconv - 1].oc, h, 1, 0);
-	linear(x, x2, p, lc[0]);
-	softmax(x, lc[0].out);
+	h_prev = h;
+	w_prev = w;
+	maxpool(x2, x, &h, &w, cc[m->model_config.nconv - 1].oc, h, 1, 0);
+	avgpool(x2 + cc[m->model_config.nconv - 1].oc, x, &h_prev, &w_prev, cc[m->model_config.nconv - 1].oc, 7, 1, 0);
+	batchnorm(x, x2, p, m->bn_config[0], h, w);
+	linear(x2, x, p, lc[0]);
+	relu(x2, lc[0].out);
+	batchnorm(x, x2, p, m->bn_config[1], h, w);
+	linear(x2, x, p, lc[1]);
+	softmax(x2, lc[1].out);
+	memcpy(x, x2, lc[1].out * sizeof(float));
 }
 
 static void error_usage()
