@@ -4,22 +4,16 @@ XCODESELECT := $(shell xcode-select -p 2>/dev/null)
 CC = $(if $(XCODESELECT),clang,gcc)
 CXX = $(if $(XCODESELECT),clang++,g++)
 
-CFLAGS := -Os -Wall -Wno-unused-function
+CFLAGS := -Os -Wall
 LDFLAGS := -lm
 
 SRC := func_common.c
 
-# use BLIS if variable BLIS=1
-ifeq ($(BLIS),1)
-    LDFLAGS += -lblis
-    SRC += func_blis.c
-    ifeq ($(CC),clang)
-        LIBBLIS_HOME = $(shell brew --prefix blis)
-        LDFLAGS += -I$(LIBBLIS_HOME)/include -L$(LIBBLIS_HOME)/lib
-    endif
-else
-    SRC += func.c
-endif
+# use BLIS if variable `BLIS` is set
+LIBBLIS_HOME := $(if $(filter clang,$(CC)),$(shell brew --prefix blis),)
+LDFLAGS += $(if $(BLIS),-lblis,)
+LDFLAGS +=  $(if $(and $(filter clang,$(CC)),$(BLIS)),-I$(LIBBLIS_HOME)/include -L$(LIBBLIS_HOME)/lib,)
+SRC += $(if $(BLIS),func_blis.c,func.c)
 
 compile: 
 	$(CC) $(CFLAGS) run.c $(SRC) -o run $(LDFLAGS)
@@ -38,11 +32,8 @@ nbchk:
 	rm -f *.nbconvert.ipynb
 	for x in $(filter-out train.ipynb prep.ipynb compare_all.ipynb, $(wildcard *.ipynb)); do jupyter nbconvert --execute --to notebook $$x; done
 
-ifeq ($(CXX),clang++)
-    CPPUTEST_HOME := $(shell brew --prefix cpputest)
-    LDFLAGS += -L$(CPPUTEST_HOME)/lib -I$(CPPUTEST_HOME)/include
-endif
-
+CPPUTEST_HOME := $(if $(filter clang++,$(CXX)),$(shell brew --prefix cpputest),)
+LDFLAGS += $(if $(filter clang++,$(CXX)),-L$(CPPUTEST_HOME)/lib -I$(CPPUTEST_HOME)/include,)
 ut: utmain.c $(CPPUTESTS)
 	$(CXX) -o $@ utmain.c test_func.c $(SRC) $(CFLAGS) $(LDFLAGS) -lCppUTest -lCppUTestExt $(MACROS)
 
