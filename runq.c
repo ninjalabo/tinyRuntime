@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include "func.h"
+#include "func_q.h"
 
 #define IMAGE_SZ (3 * 224 * 224)	// model input image size (all images are resized to this)
 #define IM2COL_MAX_SZ (3 * 49 * 112 * 112)	// maximum array size after im2col

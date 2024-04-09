@@ -15,6 +15,9 @@ LDFLAGS += $(if $(BLIS),-lblis,)
 LDFLAGS +=  $(if $(and $(filter clang,$(CC)),$(BLIS)),-I$(LIBBLIS_HOME)/include -L$(LIBBLIS_HOME)/lib,)
 SRC += $(if $(BLIS),func_blis.c,func.c)
 
+# use arm_neon.h if ARCH=arm
+SRC += $(if $(filter arm,$(ARCH)),func_q_arm.c,func_q.c)
+
 compile: 
 	$(CC) $(CFLAGS) run.c $(SRC) -o run $(LDFLAGS)
 	$(CC) $(CFLAGS) runq.c $(SRC) -o runq $(LDFLAGS)
