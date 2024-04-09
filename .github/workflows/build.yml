@@ -76,10 +76,10 @@ jobs:
 
       - name: Dependencies
         id: depends
+        # line: `sudo rm ...` remove preinstalled Python to avoid conflicts
         run: |
           brew update
-          find / -name "Library/Frameworks/Python.framework" | xargs rm -rf
-          brew install --force python3 && brew unlink python3 && brew unlink python3 && brew link --overwrite python3
+          sudo rm -rf /Library/Frameworks/Python.framework/
           brew install cpputest blis llvm libomp
           export PATH="/usr/local/opt/llvm/bin:$PATH"
 
