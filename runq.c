@@ -38,13 +38,13 @@ typedef struct {
 
 static void malloc_run_state(Runstate * s)
 {
-	s->x = calloc(IM2COL_MAX_SZ, sizeof(float));
-	s->x2 = calloc(OUTPUT_MAX_SZ, sizeof(float));
-	s->x3 = calloc(IM2COL_SECOND_MAX_SZ, sizeof(float));
+	s->x = calloc(batch_size * IM2COL_MAX_SZ, sizeof(float));
+	s->x2 = calloc(batch_size * OUTPUT_MAX_SZ, sizeof(float));
+	s->x3 = calloc(batch_size * IM2COL_SECOND_MAX_SZ, sizeof(float));
 	// FIX: too much memory allocated for `xq.s`. Should be divided by group size
 	s->xq = (QuantizedTensor) {
-	.q = calloc(IM2COL_MAX_SZ, sizeof(int8_t)),.s =
-		    calloc(IM2COL_MAX_SZ, sizeof(float))};
+	.q = calloc(batch_size * IM2COL_MAX_SZ, sizeof(int8_t)),.s =
+		    calloc(batch_size * IM2COL_MAX_SZ, sizeof(float))};
 }
 
 static void free_run_state(Runstate * s)
@@ -117,20 +117,6 @@ static void free_model(Model * m)
 	free_run_state(&m->state);
 }
 
-static void read_imagenette_image(char *path, float **image)
-{
-	FILE *file = fopen(path, "rb");
-	if (!file) {
-		fprintf(stderr, "Couldn't open file %s\n", path);
-		exit(EXIT_FAILURE);
-	}
-	if (fread(*image, sizeof(float), IMAGE_SZ, file) != IMAGE_SZ) {
-		printf("Image read failed");
-		exit(EXIT_FAILURE);
-	}
-	fclose(file);
-}
-
 #ifdef DEBUG
 // sanity check function for writing tensors,
 // e.g., it can be used to evaluate values after a specific layer.
@@ -193,7 +179,8 @@ static void forward(Model * m, float *image)
 	batchnorm(x, x2, sf, bc[0], h, w);
 	relu(x, bc[0].ic * h * w);
 	maxpool(x2, x, &h, &w, cc[0].oc, 3, 2, 1);
-	memcpy(x, x2, cc[0].oc * h * w * sizeof(float));
+	memcpy(x, x2,
+	       batch_size * cc[0].oc * h * w * sizeof(float));
 
 	// block 1.1 and 1.2
 	for (int i = 1; i < 4; i += 2) {
@@ -209,7 +196,8 @@ static void forward(Model * m, float *image)
 		// skip connection, no change
 		matadd(x, x2, cc[i + 1].oc * h * w);
 		relu(x, cc[i + 1].oc * h * w);
-		memcpy(x2, x, cc[i + 1].oc * h * w * sizeof(float));
+		memcpy(x2, x,
+		       batch_size * cc[i + 1].oc * h * w * sizeof(float));
 	}
 
 	// block 2-4
@@ -233,7 +221,8 @@ static void forward(Model * m, float *image)
 		batchnorm(x3, x2, sf, bc[i + 2], h, w);
 		matadd(x, x3, cc[i + 2].oc * h * w);
 		relu(x, cc[i + 2].oc * h * w);
-		memcpy(x2, x, cc[i + 2].oc * h * w * sizeof(float));
+		memcpy(x2, x,
+		       batch_size * cc[i + 2].oc * h * w * sizeof(float));
 
 		// block i.2
 		im2col_q(x3, x, cc[i + 3], &h, &w);
@@ -250,7 +239,9 @@ static void forward(Model * m, float *image)
 		relu(x, cc[i + 4].oc * h * w);
 		// the final block output doesn't need to be copied
 		if (i < 11) {
-			memcpy(x2, x, cc[i + 4].oc * h * w * sizeof(float));
+			memcpy(x2, x,
+			       batch_size * cc[i + 4].oc * h * w *
+			       sizeof(float));
 		}
 	}
 
@@ -270,29 +261,53 @@ static void error_usage()
 int main(int argc, char **argv)
 {
 	char *model_path = NULL;
-	char *image_path = NULL;
+	char **image_paths = NULL;
 
 	// read images and model path, then outputs the probability distribution for the given images.
 	if (argc < 3) {
 		error_usage();
 	}
+	// set global variable batch size
+	char* bs_env = getenv("BS");
+	int bs = (bs_env != NULL) ? atoi(bs_env) : 1;
+	if (bs <= 0) {
+		printf("Invalid batch size\n");
+		exit(EXIT_FAILURE);
+	}
+	batch_size = bs;
 
 	model_path = argv[1];
 	Model model;
 	build_model(&model, model_path);
-	float *image = malloc(IMAGE_SZ * sizeof(float));
-	for (int i = 2; i < argc; i++) {
-		image_path = argv[i];
-		read_imagenette_image(image_path, &image);
-
-		forward(&model, image);	// output (nclass,) is stored in model.state.x
-		for (int j = 0; j < model.model_config.nclasses; j++) {
-			printf("%f\t", model.state.x[j]);
+	float *images = malloc(batch_size * IMAGE_SZ * sizeof(float));
+	image_paths = &argv[2];
+	int niter = (argc - 2) / batch_size;
+	int nclasses = model.model_config.nclasses;
+	for (int i = 0; i < niter; i++) {
+		read_imagenette_image(&image_paths[i * batch_size], images);
+		forward(&model, images);	// output (nclass,) is stored in model.state.x
+		for (int bs = 0; bs < batch_size; bs++) {
+			for (int j = 0; j < nclasses; j++) {
+				printf("%f\t",
+				       model.state.x[bs * nclasses + j]);
+			}
+			printf("\n");
 		}
-		printf("\n");
+	}
+	// process the remaining images
+	batch_size = (argc - 2) % batch_size;
+	if (batch_size != 0) {
+		read_imagenette_image(&image_paths[niter * batch_size], images);
+		forward(&model, images);
+		for (int bs = 0; bs < batch_size; bs++) {
+			for (int j = 0; j < model.model_config.nclasses; j++) {
+				printf("%f\t", model.state.x[j]);
+			}
+			printf("\n");
+		}
 	}
 
-	free(image);
+	free(images);
 	free_model(&model);
 	return 0;
 }

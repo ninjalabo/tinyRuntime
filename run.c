@@ -16,9 +16,9 @@
 #define OUTPUT_MAX_SZ (64 * 112 * 112)	// maximum output size of layers during forward pass
 
 typedef struct {
-	float *x;		// buffer to store the input (28*28,)
-	float *x2;		// buffer to store the output of a layer (25*28*28,)
-	float *x3;		// buffer to store the output of a layer (9*28*28,)
+	float *x;		// buffer to store the input
+	float *x2;		// buffer to store the output of a layer
+	float *x3;		// buffer to store the output of a layer
 } Runstate;
 
 typedef struct {
@@ -34,9 +34,9 @@ typedef struct {
 
 static void malloc_run_state(Runstate * s)
 {
-	s->x = calloc(IM2COL_MAX_SZ, sizeof(float));
-	s->x2 = calloc(OUTPUT_MAX_SZ, sizeof(float));
-	s->x3 = calloc(IM2COL_SECOND_MAX_SZ, sizeof(float));
+	s->x = calloc(batch_size * IM2COL_MAX_SZ, sizeof(float));
+	s->x2 = calloc(batch_size * OUTPUT_MAX_SZ, sizeof(float));
+	s->x3 = calloc(batch_size * IM2COL_SECOND_MAX_SZ, sizeof(float));
 }
 
 static void free_run_state(Runstate * s)
@@ -103,20 +103,6 @@ static void free_model(Model * m)
 	free_run_state(&m->state);
 }
 
-static void read_imagenette_image(char *path, float **image)
-{
-	FILE *file = fopen(path, "rb");
-	if (!file) {
-		fprintf(stderr, "Couldn't open file %s\n", path);
-		exit(EXIT_FAILURE);
-	}
-	if (fread(*image, sizeof(float), IMAGE_SZ, file) != IMAGE_SZ) {
-		printf("Image read failed");
-		exit(EXIT_FAILURE);
-	}
-	fclose(file);
-}
-
 #ifdef DEBUG
 // sanity check function for writing tensors, e.g., it can be used to evaluate values after a specific layer.
 static void write_tensor(float *x, int size)
@@ -128,7 +114,7 @@ static void write_tensor(float *x, int size)
 }
 #endif
 
-static void forward(Model * m, float *image)
+static void forward(Model * m, float *images)
 {
 	ConvConfig *cc = m->conv_config;
 	LinearConfig *lc = m->linear_config;
@@ -143,11 +129,11 @@ static void forward(Model * m, float *image)
 	int h_prev;		// buffer to store previous height for skip connection
 	int w_prev;		// buffer to store previous width for skip connection
 
-	im2col(x, image, cc[0], &h, &w);
+	im2col(x, images, cc[0], &h, &w);
 	conv(x2, x, p, cc[0], h, w);
 	relu(x, cc[0].oc * h * w);
 	maxpool(x, x2, &h, &w, cc[0].oc, 3, 2, 1);
-	memcpy(x2, x, cc[0].oc * h * w * sizeof(float));
+	memcpy(x2, x, batch_size * cc[0].oc * h * w * sizeof(float));
 
 	// block 1.1 and 1.2
 	for (int i = 1; i < 4; i += 2) {
@@ -159,7 +145,8 @@ static void forward(Model * m, float *image)
 		// skip connection, no change
 		matadd(x, x2, cc[i + 1].oc * h * w);
 		relu(x, cc[i + 1].oc * h * w);
-		memcpy(x2, x, cc[i + 1].oc * h * w * sizeof(float));
+		memcpy(x2, x,
+		       batch_size * cc[i + 1].oc * h * w * sizeof(float));
 	}
 
 	// block 2-4
@@ -178,7 +165,8 @@ static void forward(Model * m, float *image)
 		conv(x2, x3, p, cc[i + 2], h, w);
 		matadd(x, x2, cc[i + 2].oc * h * w);
 		relu(x, cc[i + 2].oc * h * w);
-		memcpy(x2, x, cc[i + 2].oc * h * w * sizeof(float));
+		memcpy(x2, x,
+		       batch_size * cc[i + 2].oc * h * w * sizeof(float));
 
 		// block i.2
 		im2col(x3, x, cc[i + 3], &h, &w);
@@ -191,7 +179,9 @@ static void forward(Model * m, float *image)
 		relu(x, cc[i + 4].oc * h * w);
 		// the final block output doesn't need to be copied
 		if (i < 11) {
-			memcpy(x2, x, cc[i + 4].oc * h * w * sizeof(float));
+			memcpy(x2, x,
+			       batch_size * cc[i + 4].oc * h * w *
+			       sizeof(float));
 		}
 	}
 
@@ -210,29 +200,53 @@ static void error_usage()
 int main(int argc, char **argv)
 {
 	char *model_path = NULL;
-	char *image_path = NULL;
+	char **image_paths = NULL;
 
 	// read images and model path, then outputs the probability distribution for the given images.
 	if (argc < 3) {
 		error_usage();
 	}
+	// set global variable batch size
+	char* bs_env = getenv("BS");
+	int bs = (bs_env != NULL) ? atoi(bs_env) : 1;
+	if (bs <= 0) {
+		printf("Invalid batch size\n");
+		exit(EXIT_FAILURE);
+	}
+	batch_size = bs;
 
 	model_path = argv[1];
 	Model model;
 	build_model(&model, model_path);
-	float *image = malloc(IMAGE_SZ * sizeof(float));
-	for (int i = 2; i < argc; i++) {
-		image_path = argv[i];
-		read_imagenette_image(image_path, &image);
-
-		forward(&model, image);	// output (nclass,) is stored in model.state.x
-		for (int j = 0; j < model.model_config.nclasses; j++) {
-			printf("%f\t", model.state.x[j]);
+	float *images = malloc(batch_size * IMAGE_SZ * sizeof(float));
+	image_paths = &argv[2];
+	int niter = (argc - 2) / batch_size;
+	int nclasses = model.model_config.nclasses;
+	for (int i = 0; i < niter; i++) {
+		read_imagenette_image(&image_paths[i * batch_size], images);
+		forward(&model, images);	// output (nclass,) is stored in model.state.x
+		for (int bs = 0; bs < batch_size; bs++) {
+			for (int j = 0; j < nclasses; j++) {
+				printf("%f\t",
+				       model.state.x[bs * nclasses + j]);
+			}
+			printf("\n");
 		}
-		printf("\n");
+	}
+	// process the remaining images
+	batch_size = (argc - 2) % batch_size;
+	if (batch_size != 0) {
+		read_imagenette_image(&image_paths[niter * batch_size], images);
+		forward(&model, images);
+		for (int bs = 0; bs < batch_size; bs++) {
+			for (int j = 0; j < model.model_config.nclasses; j++) {
+				printf("%f\t", model.state.x[j]);
+			}
+			printf("\n");
+		}
 	}
 
-	free(image);
+	free(images);
 	free_model(&model);
 	return 0;
 }
