@@ -1,6 +1,7 @@
 #include "CppUTest/TestHarness.h"
 
 #include "func.h"
+#include "func_q.h"
 
 #define TOL 0.00001
 #define eps 0.00001f
