@@ -40,5 +40,8 @@ LDFLAGS += $(if $(filter clang++,$(CXX)),-L$(CPPUTEST_HOME)/lib -I$(CPPUTEST_HOM
 ut: utmain.c $(CPPUTESTS)
 	$(CXX) -o $@ utmain.c test_func.c $(SRC) $(CFLAGS) $(LDFLAGS) -lCppUTest -lCppUTestExt $(MACROS)
 
+pt: test_speed.c
+	$(CC) -o $@ test_speed.c $(SRC) $(CFLAGS) $(LDFLAGS)
+
 .PHONY: clean compile py nbchk ut
 
