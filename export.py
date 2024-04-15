@@ -59,7 +59,7 @@ def fold_batchnorm(cnn, bn) :
     
 
 
-def export_model(model_path="model.pt", file_path="model.bin"):
+def export_model(model, file_path="modelq8.bin"):
     '''
     Export the quantized model to a file
     The data inside the file follows this order:
@@ -67,7 +67,6 @@ def export_model(model_path="model.pt", file_path="model.bin"):
     2. CNN, FC and BN layers' configuration
     3. CNN, FC and BN layers' parameters
     '''
-    model = torch.load(model_path)
     f = open(file_path, "wb")
     # write model config
     conv_layers = [layer for layer in model.modules() if isinstance(layer, torch.nn.Conv2d)]
@@ -118,7 +117,7 @@ def calculate_groupsize(dim, gs):
         factors = list(divisors(dim)) # give the factors of number "dim"
         return min(factors, key=lambda x: abs(x - gs)) # find the closest number to group size
 
-def export_modelq8(model_path="model.pt", file_path="modelq8.bin", gs=64):
+def export_modelq8(model, file_path="modelq8.bin", gs=64):
     '''
     Export the quantized model to a file
     The data inside the file follows this order:
@@ -128,7 +127,6 @@ def export_modelq8(model_path="model.pt", file_path="modelq8.bin", gs=64):
     4. CNN and FC layers' scaling factors
     5. BN layers' parameters
     '''
-    model = torch.load(model_path)
     f = open(file_path, "wb")
     # write model config
     conv_layers = [layer for layer in model.modules() if isinstance(layer, torch.nn.Conv2d)]
@@ -148,15 +146,21 @@ def export_modelq8(model_path="model.pt", file_path="modelq8.bin", gs=64):
     for layer in conv_layers:
         # calculates group sizes for weights and biases
         gs_weight = calculate_groupsize(layer.in_channels * layer.kernel_size[0]**2, gs)
-        gs_bias = calculate_groupsize(layer.out_features, gs) if layer.bias is not None else 0
+        gs_bias = calculate_groupsize(layer.out_channels, gs) if layer.bias is not None else 0
         group_sizes.append(gs_weight)
+        if layer.bias is not None:
+            group_sizes.append(gs_bias)
 
         f.write(struct.pack("9i", layer.kernel_size[0], layer.stride[0], layer.padding[0],
                 layer.in_channels, layer.out_channels, qoffset, soffset, gs_weight, gs_bias))
         # set offsets to the start of next layer
         nweights = layer.out_channels * layer.in_channels * layer.kernel_size[0]**2
-        qoffset += nweights
-        soffset += nweights // gs_weight
+        if layer.bias is not None:
+            qoffset += nweights + layer.out_channels
+            soffset += nweights // gs_weight + layer.out_channels // gs_bias
+        else:
+            qoffset += nweights
+            soffset += nweights // gs_weight
 
     for layer in linear_layers:
        
