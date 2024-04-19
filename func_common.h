@@ -8,8 +8,7 @@ extern void im2col(float *col, float *im, ConvConfig cc, int *height,
 extern void im2col_q(float *col, float *im, ConvConfigQ cc, int *height,
 		     int *width);
 
-extern void batchnorm(float *xout, float *x, float *p, BnConfig bc, int height,
-		      int width);
+extern void batchnorm(float *xout, float *x, float *p, BnConfig bc, int size);
 
 extern void maxpool(float *xout, float *x, int *height, int *width,
 		    int nchannels, int ksize, int stride, int pad);

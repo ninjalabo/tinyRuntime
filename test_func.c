@@ -140,7 +140,7 @@ TEST(TestGroup, Batchnorm)
         BnConfig bc = { ic, offset };
 
         float xout[ic * h * w];
-        batchnorm(xout, x, p, bc, h, w);
+        batchnorm(xout, x, p, bc, h * w);
 
         float ref[] =
             { 3.8999955f, 4.8999905001f, 7.9597880752f, 9.373998102f };
