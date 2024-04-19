@@ -57,23 +57,22 @@ void im2col_q(float *col, float *im, ConvConfigQ cc, int *height, int *width)
 }
 
 // TODO: optimize using blis and/or combine parameters with previous layer
-void batchnorm(float *xout, float *x, float *p, BnConfig bc, int height,
-	       int width)
+// TODO: make batchnorm1d and batchnorm2d if that is better
+void batchnorm(float *xout, float *x, float *p, BnConfig bc, int size)
 {
-	// x (nchannels,height,width) -> xout (nchannels,height,width)
-	int hw = height * width;
-	int nchannels = bc.ic;
+	// x (ngroups,size) -> xout (ngroups,size)
+	int ngroups = bc.ic;
 	float *w = p + bc.offset;
-	float *b = w + nchannels;
-	float *rmean = b + nchannels;
-	float *rvar = rmean + nchannels;
+	float *b = w + ngroups;
+	float *rmean = b + ngroups;
+	float *rvar = rmean + ngroups;
 
-	for (int c = 0; c < nchannels; c++) {
-		for (int i = 0; i < hw; i++) {
+	for (int group = 0; group < ngroups; group++) {
+		for (int i = 0; i < size; i++) {
 			float val =
-			    (x[c * hw + i] - rmean[c]) /
-			    sqrt(rvar[c] + eps) * w[c] + b[c];
-			xout[c * hw + i] = val;
+			    (x[group * size + i] - rmean[group]) /
+			    sqrt(rvar[group] + eps) * w[group] + b[group];
+			xout[group * size + i] = val;
 		}
 	}
 }

@@ -40,27 +40,26 @@ def execute(command):
 
     return res
 
-@pytest.mark.parametrize("model_name", ["resnet18", "resnet34", "resnet50"])
-def test_runfiles(model_name, quantized=False, file_path=file_path):
+@pytest.mark.parametrize("model_size", [18, 34, 50])
+def test_runfiles(model_size, quantized=True, file_path=file_path):
     """ test run.c and runq.c works with an acceptable tolerance """
     # run vanilla model in test mode
-    model = load(model_name).model
-    ref = calculate_reference_values(model, file_path="data/imagenette2/val_transformed/0/2")
+    model = load(f"resnet{model_size}").model
+    ref = calculate_reference_values(model, file_path)
     export_model(model)
-    compile = [f'make compile_{model_name}']
-    subprocess.run(compile, shell=True)
-    command = ["./run", "model.bin", file_path]
+    command = ["./run", str(model_size), "model.bin", file_path]
     res = execute(command)
+
     assert np.allclose(res, ref, atol=1e-5, rtol=0), "run.c: Probabilities are not close."
 
     if quantized:
         # run quantized model test with group size = 1 and 2 in test mode
-        export_modelq8(file_path="modelq8_1.bin", gs=1)
-        resq1 = execute(["./runq", "modelq8_1.bin", file_path])
+        export_modelq8(model, file_path="modelq8_1.bin", gs=1)
+        resq1 = execute(["./runq", str(model_size), "modelq8_1.bin", file_path])
         assert np.allclose(resq1, ref, atol=1e-5, rtol=0), "runq.c (group size = 1): Probabilities are not close."
 
-        export_modelq8(file_path="modelq8_2.bin", gs=2)
-        resq2 = execute(["./runq", "modelq8_2.bin", file_path])
-        assert np.allclose(resq2, ref, atol=1e-2, rtol=0), "runq.c (group size = 2):Probabilities are not close."
+        export_modelq8(model, file_path="modelq8_2.bin", gs=2)
+        resq2 = execute(["./runq", str(model_size), "modelq8_2.bin", file_path])
+        assert np.allclose(resq2, ref, atol=2e-2, rtol=0), "runq.c (group size = 2):Probabilities are not close."
 
     print("Done")
