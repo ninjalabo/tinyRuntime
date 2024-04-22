@@ -33,7 +33,7 @@ py:
 
 nbchk:
 	rm -f *.nbconvert.ipynb
-	for x in $(filter-out train.ipynb prep.ipynb compare_all.ipynb, $(wildcard *.ipynb)); do jupyter nbconvert --execute --to notebook $$x; done
+	for x in $(filter-out train.ipynb prep.ipynb compare_all.ipynb test_dataset_generator.ipynb, $(wildcard *.ipynb)); do jupyter nbconvert --execute --to notebook $$x; done
 
 CPPUTEST_HOME := $(if $(filter clang++,$(CXX)),$(shell brew --prefix cpputest),)
 LDFLAGS += $(if $(filter clang++,$(CXX)),-L$(CPPUTEST_HOME)/lib -I$(CPPUTEST_HOME)/include,)
