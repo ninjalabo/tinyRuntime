@@ -16,9 +16,9 @@
 #define OUTPUT_MAX_SZ (64 * 112 * 112)	// maximum output size of layers during forward pass
 
 typedef struct {
-	float *x;		// buffer to store the input (28*28,)
-	float *x2;		// buffer to store the output of a layer (25*28*28,)
-	float *x3;		// buffer to store the output of a layer (9*28*28,)
+	float *x;		// buffer to store the input
+	float *x2;		// buffer to store the output of a layer
+	float *x3;		// buffer to store the output of a layer
 } Runstate;
 
 typedef struct {
@@ -35,9 +35,9 @@ typedef struct {
 
 static void malloc_run_state(Runstate * s)
 {
-	s->x = calloc(IM2COL_MAX_SZ, sizeof(float));
-	s->x2 = calloc(OUTPUT_MAX_SZ, sizeof(float));
-	s->x3 = calloc(IM2COL_SECOND_MAX_SZ, sizeof(float));
+	s->x = calloc(batch_size * IM2COL_MAX_SZ, sizeof(float));
+	s->x2 = calloc(batch_size * OUTPUT_MAX_SZ, sizeof(float));
+	s->x3 = calloc(batch_size * IM2COL_SECOND_MAX_SZ, sizeof(float));
 }
 
 static void free_run_state(Runstate * s)
@@ -106,20 +106,6 @@ static void free_model(Model * m)
 	free_run_state(&m->state);
 }
 
-static void read_imagenette_image(char *path, float **image)
-{
-	FILE *file = fopen(path, "rb");
-	if (!file) {
-		fprintf(stderr, "Couldn't open file %s\n", path);
-		exit(EXIT_FAILURE);
-	}
-	if (fread(*image, sizeof(float), IMAGE_SZ, file) != IMAGE_SZ) {
-		printf("Image read failed");
-		exit(EXIT_FAILURE);
-	}
-	fclose(file);
-}
-
 #ifdef DEBUG
 // sanity check function for writing tensors, e.g., it can be used to evaluate values after a specific layer.
 static void write_tensor(float *x, int size)
@@ -150,11 +136,11 @@ static void basic_block(float *x, float *x2, float *x3, float *p,
 	}
 
 	int oc = downsample ? cc[*i + 2].oc : cc[*i + 1].oc;
-	int size = oc * (*h) * (*w) * sizeof(float);
+	int size = oc * (*h) * (*w);
 	*i += downsample ? 3 : 2;
-	matadd(x, x2, oc * (*h) * (*w));
-	relu(x, oc * (*h) * (*w));
-	memcpy(x2, x, size);
+	matadd(x, x2, size);
+	relu(x, size);
+	matcopy_float(x2, x, size);
 }
 
  static void bottleneck(float *x, float *x2, float *x3, float *p,
@@ -179,11 +165,11 @@ static void basic_block(float *x, float *x2, float *x3, float *p,
 	}
 
 	int oc = downsample ? cc[*i + 3].oc : cc[*i + 2].oc;
-	int size = oc * (*h) * (*w) * sizeof(float);
+	int size = oc * (*h) * (*w);
 	*i += downsample ? 4 : 3;
-	matadd(x, x2, oc * (*h) * (*w));
-	relu(x, oc * (*h) * (*w));
-	memcpy(x2, x, size);
+	matadd(x, x2, size);
+	relu(x, size);
+	matcopy_float(x2, x, size);
 }
 
  static void sequential_block(float *x, float *x2, float *x3, float *p,
@@ -218,19 +204,18 @@ static void basic_block(float *x, float *x2, float *x3, float *p,
 	}
 }
 
- static void head(float *x, float *x2, float *image, float *p, ConvConfig *cc,
+ static void head(float *x, float *x2, float *images, float *p, ConvConfig *cc,
 		  int *h, int *w)
 {
-	im2col(x, image, cc[0], h, w);
+	im2col(x, images, cc[0], h, w);
 	conv(x2, x, p, cc[0], *h, *w);
 	relu(x2, cc[0].oc * (*h) * (*w));
 	maxpool(x, x2, h, w, cc[0].oc, 3, 2, 1);
-	memcpy(x2, x, cc[0].oc * (*h) * (*w) * sizeof(float));
+	matcopy_float(x2, x, cc[0].oc * (*h) * (*w));
 }
 
- static void tail(float *x, float *x2, float *x3, float *image, float *p,
-		  ConvConfig *cc, LinearConfig *lc, BnConfig *bc, int h, int w,
-		  int i)
+ static void tail(float *x, float *x2, float *x3, float *p, ConvConfig *cc,
+		  LinearConfig *lc, BnConfig *bc, int h, int w, int i)
 {
 	int h_prev = h;
 	int w_prev = w;
@@ -243,14 +228,14 @@ static void basic_block(float *x, float *x2, float *x3, float *p,
 	batchnorm(x, x2, p, bc[1], 1);
 	linear(x2, x, p, lc[1]);
 	softmax(x2, lc[1].out);
-	memcpy(x, x2, lc[1].out * sizeof(float));
+	matcopy_float(x, x2, lc[1].out);
 }
 
- static void resnet18(float *x, float *x2, float *x3, float *image, float *p,
+ static void resnet18(float *x, float *x2, float *x3, float *images, float *p,
 		      ConvConfig *cc, LinearConfig *lc, BnConfig *bc, int h,
 		      int w)
 {
-	head(x, x2, image, p, cc, &h, &w);
+	head(x, x2, images, p, cc, &h, &w);
 	int i = 1; // take care of which convolutional layer to use
 	// 2 BasicBlocks, no downsampling
 	sequential_block(x, x2, x3, p, cc, &h, &w, &i, 2, false);
@@ -261,14 +246,14 @@ static void basic_block(float *x, float *x2, float *x3, float *p,
 	// 2 BasicBlocks, with one downsampling block
 	sequential_block(x, x2, x3, p, cc, &h, &w, &i, 2, true);
 	// fine tuned layers
-	tail(x, x2, x3, image, p, cc, lc, bc, h, w, i);
+	tail(x, x2, x3, p, cc, lc, bc, h, w, i);
 }
 
- static void resnet34(float *x, float *x2, float *x3, float *image, float *p,
+ static void resnet34(float *x, float *x2, float *x3, float *images, float *p,
 		      ConvConfig *cc, LinearConfig *lc, BnConfig *bc, int h,
 		      int w)
 {
-	head(x, x2, image, p, cc, &h, &w);
+	head(x, x2, images, p, cc, &h, &w);
 	int i = 1; // take care of which convolutional layer to use
 	// 3 BasicBlocks, no downsampling
 	sequential_block(x, x2, x3, p, cc, &h, &w, &i, 3, false);
@@ -279,14 +264,14 @@ static void basic_block(float *x, float *x2, float *x3, float *p,
 	// 3 BasicBlocks, with one downsampling block
 	sequential_block(x, x2, x3, p, cc, &h, &w, &i, 3, true);
 	// fine tuned layers
-	tail(x, x2, x3, image, p, cc, lc, bc, h, w, i);
+	tail(x, x2, x3, p, cc, lc, bc, h, w, i);
 }
 
- static void resnet50(float *x, float *x2, float *x3, float *image, float *p,
+ static void resnet50(float *x, float *x2, float *x3, float *images, float *p,
 		      ConvConfig *cc, LinearConfig *lc, BnConfig *bc, int h,
 		      int w)
 {
-	head(x, x2, image, p, cc, &h, &w);
+	head(x, x2, images, p, cc, &h, &w);
 	int i = 1; // take care of which convolutional layer to use
 	// 3 Bottlenecks, with one downsampling block
 	sequential_bottleneck(x, x2, x3, p, cc, &h, &w, &i, 3, true);
@@ -297,10 +282,10 @@ static void basic_block(float *x, float *x2, float *x3, float *p,
 	// 3 Bottlenecks, with one downsampling block
 	sequential_bottleneck(x, x2, x3, p, cc, &h, &w, &i, 3, true);
 	// fine tuned layers
-	tail(x, x2, x3, image, p, cc, lc, bc, h, w, i);
+	tail(x, x2, x3, p, cc, lc, bc, h, w, i);
 }
 
-static void forward(Model *m, float *image, int model_size)
+static void forward(Model *m, float *images, int model_size)
 {
 	ConvConfig *cc = m->conv_config;
 	LinearConfig *lc = m->linear_config;
@@ -315,11 +300,11 @@ static void forward(Model *m, float *image, int model_size)
 	int w = 224; // width
 
 	if (model_size == 18)
-		resnet18(x, x2, x3, image, p, cc, lc, bc, h, w);
+		resnet18(x, x2, x3, images, p, cc, lc, bc, h, w);
 	else if (model_size == 34)
-		resnet34(x, x2, x3, image, p, cc, lc, bc, h, w);
+		resnet34(x, x2, x3, images, p, cc, lc, bc, h, w);
 	else if (model_size == 50)
-		resnet50(x, x2, x3, image, p, cc, lc, bc, h, w);
+		resnet50(x, x2, x3, images, p, cc, lc, bc, h, w);
 	else {
 		fprintf(stderr, "Invalid structure size\n");
 		exit(EXIT_FAILURE);
@@ -329,37 +314,63 @@ static void forward(Model *m, float *image, int model_size)
 static void error_usage()
 {
 	fprintf(stderr, "Usage:   run <model size> <model> <image>\n");
-	fprintf(stderr, "Example: run model.bin image1 image2 ... imageN\n");
+	fprintf(stderr, "Example: run 18 resnet18.bin img1 img2 ... imgN\n");
 	exit(EXIT_FAILURE);
 }
 
 int main(int argc, char **argv)
 {
 	char *model_path = NULL;
-	char *image_path = NULL;
+	char **image_paths = NULL;
 
 	// read images and model path, then outputs the probability distribution for the given images.
 	if (argc < 4) {
 		error_usage();
 	}
+	// set global var batch size if environmental var BS is defined
+	char* bs_env = getenv("BS");
+	int bs = (bs_env != NULL) ? atoi(bs_env) : 1;
+	if (bs <= 0) {
+		printf("Invalid batch size\n");
+		exit(EXIT_FAILURE);
+	}
+	batch_size = bs;
 
 	int model_size = atoi(argv[1]);
 	model_path = argv[2];
 	Model model;
 	build_model(&model, model_path);
-	float *image = malloc(IMAGE_SZ * sizeof(float));
-	for (int i = 3; i < argc; i++) {
-		image_path = argv[i];
-		read_imagenette_image(image_path, &image);
+	float *images = malloc(batch_size * IMAGE_SZ * sizeof(float));
+	image_paths = &argv[3];
 
-		forward(&model, image, model_size);
-		for (int j = 0; j < model.model_config.nclasses; j++) {
-			printf("%f\t", model.state.x[j]);
+	int nimages = argc - 3;
+	int niter = nimages / batch_size;
+	int nclasses = model.model_config.nclasses;
+	for (int i = 0; i < niter; i++) {
+		read_imagenette_image(&image_paths[i * batch_size], images);
+		forward(&model, images, model_size); // output (nclass,) is stored in model.state.x
+		for (int bs = 0; bs < batch_size; bs++) {
+			for (int j = 0; j < nclasses; j++) {
+				printf("%f\t",
+				       model.state.x[bs * nclasses + j]);
+			}
+			printf("\n");
 		}
-		printf("\n");
+	}
+	// process the remaining images
+	batch_size = nimages % batch_size;
+	if (batch_size != 0) {
+		read_imagenette_image(&image_paths[niter * batch_size], images);
+		forward(&model, images, model_size);
+		for (int bs = 0; bs < batch_size; bs++) {
+			for (int j = 0; j < model.model_config.nclasses; j++) {
+				printf("%f\t", model.state.x[j]);
+			}
+			printf("\n");
+		}
 	}
 
-	free(image);
+	free(images);
 	free_model(&model);
 	return 0;
-}
+	}
