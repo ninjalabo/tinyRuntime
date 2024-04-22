@@ -169,7 +169,205 @@ void dequantize2d(QuantizedTensor * qx, float *x, int nrows, int ncols, int gs)
 
 #endif
 
-static void forward(Model * m, float *image)
+static void basic_block(QuantizedTensor *xq, float *x, float *x2, float *x3,
+			int8_t *p, float *sf, ConvConfigQ *cc, BnConfig *bc,
+			int *h, int *w, int *i, bool downsample)
+{
+	int h_prev = *h;
+	int w_prev = *w;
+
+	im2col_q(x3, x, cc[*i], h, w);
+	quantize2d(xq, x3, cc[*i], (*h) * (*w));
+	conv_q(x3, xq, p, sf, cc[*i], *h, *w);
+	batchnorm(x, x3, sf, bc[*i], (*h) * (*w));
+	relu(x, cc[*i].oc * (*h) * (*w));
+	im2col_q(x3, x, cc[*i + 1], h, w);
+	quantize2d(xq, x3, cc[*i + 1], (*h) * (*w));
+	conv_q(x3, xq, p, sf, cc[*i + 1], *h, *w);
+	batchnorm(x, x3, sf, bc[*i + 1], (*h) * (*w));
+	// perform downsampling for skip connection
+	if (downsample) {
+		im2col_q(x3, x2, cc[*i + 2], &h_prev, &w_prev);
+		quantize2d(xq, x3, cc[*i + 2], (*h) * (*w));
+		conv_q(x3, xq, p, sf, cc[*i + 2], *h, *w);
+		batchnorm(x2, x3, sf, bc[*i + 2], (*h) * (*w));
+	}
+
+	int oc = downsample ? cc[*i + 2].oc : cc[*i + 1].oc;
+	int size = oc * (*h) * (*w) * sizeof(float);
+	*i += downsample ? 3 : 2;
+	matadd(x, x2, oc * (*h) * (*w));
+	relu(x, oc * (*h) * (*w));
+	memcpy(x2, x, size);
+}
+
+ static void bottleneck(QuantizedTensor *xq, float *x, float *x2, float *x3,
+			int8_t *p, float *sf, ConvConfigQ *cc, BnConfig *bc,
+			int *h, int *w, int *i, bool downsample)
+{
+	int h_prev = *h;
+	int w_prev = *w;
+
+	im2col_q(x3, x, cc[*i], h, w);
+	quantize2d(xq, x3, cc[*i], (*h) * (*w));
+	conv_q(x3, xq, p, sf, cc[*i], *h, *w);
+	batchnorm(x, x3, sf, bc[*i], (*h) * (*w));
+	relu(x, cc[*i].oc * (*h) * (*w));
+	im2col_q(x3, x, cc[*i + 1], h, w);
+	quantize2d(xq, x3, cc[*i + 1], (*h) * (*w));
+	conv_q(x3, xq, p, sf, cc[*i + 1], *h, *w);
+	batchnorm(x, x3, sf, bc[*i + 1], (*h) * (*w));
+	relu(x, cc[*i + 1].oc * (*h) * (*w));
+	im2col_q(x3, x, cc[*i + 2], h, w);
+	quantize2d(xq, x3, cc[*i + 2], (*h) * (*w));
+	conv_q(x3, xq, p, sf, cc[*i + 2], *h, *w);
+	batchnorm(x, x3, sf, bc[*i + 2], (*h) * (*w));
+	// perform downsampling for skip connection
+	if (downsample) {
+		im2col_q(x3, x2, cc[*i + 3], &h_prev, &w_prev);
+		quantize2d(xq, x3, cc[*i + 3], (*h) * (*w));
+		conv_q(x3, xq, p, sf, cc[*i + 3], *h, *w);
+		batchnorm(x2, x3, sf, bc[*i + 3], (*h) * (*w));
+	}
+
+	int oc = downsample ? cc[*i + 3].oc : cc[*i + 2].oc;
+	int size = oc * (*h) * (*w) * sizeof(float);
+	*i += downsample ? 4 : 3;
+	matadd(x, x2, oc * (*h) * (*w));
+	relu(x, oc * (*h) * (*w));
+	memcpy(x2, x, size);
+}
+
+ static void sequential_block(QuantizedTensor *xq, float *x, float *x2,
+			      float *x3, int8_t *p, float *sf, ConvConfigQ *cc,
+			      BnConfig *bc, int *h, int *w, int *i, int n,
+			      bool downsample)
+{
+	if (downsample) {
+		basic_block(xq, x, x2, x3, p, sf, cc, bc, h, w, i, true);
+		for (int j = 0; j < n - 1; j++) {
+			basic_block(xq, x, x2, x3, p, sf, cc, bc, h, w, i,
+				    false);
+		}
+	} else {
+		for (int j = 0; j < n; j++) {
+			basic_block(xq, x, x2, x3, p, sf, cc, bc, h, w, i,
+				    false);
+		}
+	}
+}
+
+ static void sequential_bottleneck(QuantizedTensor *xq, float *x, float *x2,
+				   float *x3, int8_t *p, float *sf,
+				   ConvConfigQ *cc, BnConfig *bc, int *h,
+				   int *w, int *i, int n, bool downsample)
+{
+	if (downsample) {
+		bottleneck(xq, x, x2, x3, p, sf, cc, bc, h, w, i, true);
+		for (int j = 0; j < n - 1; j++) {
+			bottleneck(xq, x, x2, x3, p, sf, cc, bc, h, w, i,
+				   false);
+		}
+	} else {
+		for (int j = 0; j < n; j++) {
+			bottleneck(xq, x, x2, x3, p, sf, cc, bc, h, w, i,
+				   false);
+		}
+	}
+}
+
+ static void head(QuantizedTensor *xq, float *x, float *x2, float *image,
+		  int8_t *p, float *sf, ConvConfigQ *cc, BnConfig *bc, int *h,
+		  int *w)
+{
+	im2col_q(x, image, cc[0], h, w);
+	quantize2d(xq, x, cc[0], (*h) * (*w));
+	conv_q(x, xq, p, sf, cc[0], *h, *w);
+	batchnorm(x2, x, sf, bc[0], (*h) * (*w));
+	relu(x2, cc[0].oc * (*h) * (*w));
+	maxpool(x, x2, h, w, cc[0].oc, 3, 2, 1);
+	memcpy(x2, x, cc[0].oc * (*h) * (*w) * sizeof(float));
+}
+
+ static void tail(QuantizedTensor *xq, float *x, float *x2, float *x3,
+		  float *image, int8_t *p, float *sf, ConvConfigQ *cc,
+		  LinearConfigQ *lc, BnConfig *bc, int h, int w, int i)
+{
+	int h_prev = h;
+	int w_prev = w;
+	maxpool(x2, x, &h, &w, cc[i - 1].oc, h, 1, 0);
+	avgpool(x2 + cc[i - 1].oc, x, &h_prev, &w_prev, cc[i - 1].oc, h_prev,
+		1, 0);
+	batchnorm(x, x2, sf, bc[i], 1);
+	quantize(xq, x, lc[0].in, lc[0].gs_weight);
+	linear_q(x2, xq, p, sf, lc[0]);
+	relu(x2, lc[0].out);
+	batchnorm(x, x2, sf, bc[i + 1], 1);
+	quantize(xq, x, lc[1].in, lc[1].gs_weight);
+	linear_q(x2, xq, p, sf, lc[1]);
+	softmax(x2, lc[1].out);
+	memcpy(x, x2, lc[1].out * sizeof(float));
+}
+
+ static void resnet18(QuantizedTensor *xq, float *x, float *x2, float *x3,
+		      float *image, int8_t *p, float *sf, ConvConfigQ *cc,
+		      LinearConfigQ *lc, BnConfig *bc, int h, int w)
+{
+	head(xq, x, x2, image, p, sf, cc, bc, &h, &w);
+	int i = 1; // take care of which convolutional layer to use
+	// 2 BasicBlocks, no downsampling
+	sequential_block(xq, x, x2, x3, p, sf, cc, bc, &h, &w, &i, 2, false);
+	// 2 BasicBlocks, with one downsampling block
+	sequential_block(xq, x, x2, x3, p, sf, cc, bc, &h, &w, &i, 2, true);
+	// 2 BasicBlocks, with one downsampling block
+	sequential_block(xq, x, x2, x3, p, sf, cc, bc, &h, &w, &i, 2, true);
+	// 2 BasicBlocks, with one downsampling block
+	sequential_block(xq, x, x2, x3, p, sf, cc, bc, &h, &w, &i, 2, true);
+	// fine tuned layers
+	tail(xq, x, x2, x3, image, p, sf, cc, lc, bc, h, w, i);
+}
+
+ static void resnet34(QuantizedTensor *xq, float *x, float *x2, float *x3,
+		      float *image, int8_t *p, float *sf, ConvConfigQ *cc,
+		      LinearConfigQ *lc, BnConfig *bc, int h, int w)
+{
+	head(xq, x, x2, image, p, sf, cc, bc, &h, &w);
+	int i = 1; // take care of which convolutional layer to use
+	// 3 BasicBlocks, no downsampling
+	sequential_block(xq, x, x2, x3, p, sf, cc, bc, &h, &w, &i, 3, false);
+	// 4 BasicBlocks, with one downsampling block
+	sequential_block(xq, x, x2, x3, p, sf, cc, bc, &h, &w, &i, 4, true);
+	// 6 BasicBlocks, with one downsampling block
+	sequential_block(xq, x, x2, x3, p, sf, cc, bc, &h, &w, &i, 6, true);
+	// 3 BasicBlocks, with one downsampling block
+	sequential_block(xq, x, x2, x3, p, sf, cc, bc, &h, &w, &i, 3, true);
+	// fine tuned layers
+	tail(xq, x, x2, x3, image, p, sf, cc, lc, bc, h, w, i);
+}
+
+ static void resnet50(QuantizedTensor *xq, float *x, float *x2, float *x3,
+		      float *image, int8_t *p, float *sf, ConvConfigQ *cc,
+		      LinearConfigQ *lc, BnConfig *bc, int h, int w)
+{
+	head(xq, x, x2, image, p, sf, cc, bc, &h, &w);
+	int i = 1; // take care of which convolutional layer to use
+	// 3 Bottlenecks, with one downsampling block
+	sequential_bottleneck(xq, x, x2, x3, p, sf, cc, bc, &h, &w, &i, 3,
+			      true);
+	// 4 Bottlenecks, with one downsampling block
+	sequential_bottleneck(xq, x, x2, x3, p, sf, cc, bc, &h, &w, &i, 4,
+			      true);
+	// 6 Bottlenecks, with one downsampling block
+	sequential_bottleneck(xq, x, x2, x3, p, sf, cc, bc, &h, &w, &i, 6,
+			      true);
+	// 3 Bottlenecks, with one downsampling block
+	sequential_bottleneck(xq, x, x2, x3, p, sf, cc, bc, &h, &w, &i, 3,
+			      true);
+	// fine tuned layers
+	tail(xq, x, x2, x3, image, p, sf, cc, lc, bc, h, w, i);
+}
+
+static void forward(Model *m, float *image, int model_size)
 {
 	ConvConfigQ *cc = m->conv_config;
 	LinearConfigQ *lc = m->linear_config;
@@ -182,87 +380,24 @@ static void forward(Model * m, float *image)
 	float *x3 = s->x3;
 	QuantizedTensor xq = s->xq;
 
-	int h = 224;		// height
-	int w = 224;		// width
-	int h_prev;		// buffer to store previous height for skip connection
-	int w_prev;		// buffer to store previous width for skip connection
+	int h = 224; // height
+	int w = 224; // width
 
-	im2col_q(x, image, cc[0], &h, &w);
-	quantize2d(&xq, x, cc[0], h * w);
-	conv_q(x2, &xq, p, sf, cc[0], h, w);
-	batchnorm(x, x2, sf, bc[0], h, w);
-	relu(x, bc[0].ic * h * w);
-	maxpool(x2, x, &h, &w, cc[0].oc, 3, 2, 1);
-	memcpy(x, x2, cc[0].oc * h * w * sizeof(float));
-
-	// block 1.1 and 1.2
-	for (int i = 1; i < 4; i += 2) {
-		im2col_q(x3, x, cc[i], &h, &w);
-		quantize2d(&xq, x3, cc[i], h * w);
-		conv_q(x, &xq, p, sf, cc[i], h, w);
-		batchnorm(x3, x, sf, bc[i], h, w);
-		relu(x3, bc[i].ic * h * w);
-		im2col_q(x, x3, cc[i + 1], &h, &w);
-		quantize2d(&xq, x, cc[i + 1], h * w);
-		conv_q(x3, &xq, p, sf, cc[i + 1], h, w);
-		batchnorm(x, x3, sf, bc[i + 1], h, w);
-		// skip connection, no change
-		matadd(x, x2, cc[i + 1].oc * h * w);
-		relu(x, cc[i + 1].oc * h * w);
-		memcpy(x2, x, cc[i + 1].oc * h * w * sizeof(float));
+	if (model_size == 18)
+		resnet18(&xq, x, x2, x3, image, p, sf, cc, lc, bc, h, w);
+	else if (model_size == 34)
+		resnet34(&xq, x, x2, x3, image, p, sf, cc, lc, bc, h, w);
+	else if (model_size == 50)
+		resnet50(&xq, x, x2, x3, image, p, sf, cc, lc, bc, h, w);
+	else {
+		fprintf(stderr, "Invalid structure size\n");
+		exit(EXIT_FAILURE);
 	}
-
-	// block 2-4
-	for (int i = 5; i < m->model_config.nconv - 4; i += 5) {
-		// block i.1
-		h_prev = h;
-		w_prev = w;
-		im2col_q(x3, x, cc[i], &h, &w);
-		quantize2d(&xq, x3, cc[i], h * w);
-		conv_q(x, &xq, p, sf, cc[i], h, w);
-		batchnorm(x3, x, sf, bc[i], h, w);
-		relu(x3, bc[i].ic * h * w);
-		im2col_q(x, x3, cc[i + 1], &h, &w);
-		quantize2d(&xq, x, cc[i + 1], h * w);
-		conv_q(x3, &xq, p, sf, cc[i + 1], h, w);
-		batchnorm(x, x3, sf, bc[i + 1], h, w);
-		// skip connection, change in stride
-		im2col_q(x3, x2, cc[i + 2], &h_prev, &w_prev);
-		quantize2d(&xq, x3, cc[i + 2], h * w);
-		conv_q(x2, &xq, p, sf, cc[i + 2], h, w);
-		batchnorm(x3, x2, sf, bc[i + 2], h, w);
-		matadd(x, x3, cc[i + 2].oc * h * w);
-		relu(x, cc[i + 2].oc * h * w);
-		memcpy(x2, x, cc[i + 2].oc * h * w * sizeof(float));
-
-		// block i.2
-		im2col_q(x3, x, cc[i + 3], &h, &w);
-		quantize2d(&xq, x3, cc[i + 3], h * w);
-		conv_q(x, &xq, p, sf, cc[i + 3], h, w);
-		batchnorm(x3, x, sf, bc[i + 3], h, w);
-		relu(x3, bc[i + 3].ic * h * w);
-		im2col_q(x, x3, cc[i + 4], &h, &w);
-		quantize2d(&xq, x, cc[i + 4], h * w);
-		conv_q(x3, &xq, p, sf, cc[i + 4], h, w);
-		batchnorm(x, x3, sf, bc[i + 4], h, w);
-		// skip connection, no change
-		matadd(x, x2, cc[i + 4].oc * h * w);
-		relu(x, cc[i + 4].oc * h * w);
-		// the final block output doesn't need to be copied
-		if (i < 11) {
-			memcpy(x2, x, cc[i + 4].oc * h * w * sizeof(float));
-		}
-	}
-
-	avgpool(x2, x, &h, &w, cc[m->model_config.nconv - 1].oc, h, 1, 0);
-	quantize(&xq, x2, lc[0].in, lc[0].gs_weight);
-	linear_q(x, &xq, p, sf, lc[0]);
-	softmax(x, lc[0].out);
 }
 
 static void error_usage()
 {
-	fprintf(stderr, "Usage:   runq <model> <image>\n");
+	fprintf(stderr, "Usage:   runq <model size> <model> <image>\n");
 	fprintf(stderr, "Example: runq modelq8.bin image1 image2 ... imageN\n");
 	exit(EXIT_FAILURE);
 }
@@ -273,19 +408,20 @@ int main(int argc, char **argv)
 	char *image_path = NULL;
 
 	// read images and model path, then outputs the probability distribution for the given images.
-	if (argc < 3) {
+	if (argc < 4) {
 		error_usage();
 	}
 
-	model_path = argv[1];
+	int model_size = atoi(argv[1]);
+	model_path = argv[2];
 	Model model;
 	build_model(&model, model_path);
 	float *image = malloc(IMAGE_SZ * sizeof(float));
-	for (int i = 2; i < argc; i++) {
+	for (int i = 3; i < argc; i++) {
 		image_path = argv[i];
 		read_imagenette_image(image_path, &image);
 
-		forward(&model, image);	// output (nclass,) is stored in model.state.x
+		forward(&model, image, model_size);
 		for (int j = 0; j < model.model_config.nclasses; j++) {
 			printf("%f\t", model.state.x[j]);
 		}
