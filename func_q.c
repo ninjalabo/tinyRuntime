@@ -73,7 +73,7 @@ void conv_q(float *xout, QuantizedTensor * x, int8_t * p, float *sf,
 					    &w[c * nrows],
 					    &sw[c * nrows / gs_w], nrows, gs_w);
 				float bias_val =
-				    gs_b > 0 ? ((float) b[c]) * sb[i / gs_b] :
+				    gs_b > 0 ? (float) b[c] * sb[c / gs_b] :
 				    0.0f;
 				xout[xout_idx + c * ncols + i] = val + bias_val;
 			}
