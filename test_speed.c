@@ -10,17 +10,21 @@
 #define MAX_BUF_SIZE (64 * 3 * 3 * 28 * 28) // size needed in im2col and conv
 #define MAX_PARAM_SIZE (512 * 512 * 512) // parameter size in linear
 
-static float x[MAX_BUF_SIZE];
-static float x2[MAX_BUF_SIZE];
-static int8_t xq_q[MAX_BUF_SIZE];
-static float xq_s[MAX_BUF_SIZE];
 static float p[MAX_PARAM_SIZE];
 static int8_t q[MAX_PARAM_SIZE];
 
-        
+static void free_run_state(float *x, float *x2, int8_t *xq_q, float *xq_s)
+{
+	free(x);
+	free(x2);
+	free(xq_q);
+	free(xq_s);
+}
+
 int main(int argc, char **argv)
 {
         // command: ./pt <function> <niter>
+	// batch size can be defined via environmental var BS
         if (argc < 2) {
 		fprintf(stderr, "Give function name as an argument\n");
 	        exit(EXIT_FAILURE);
@@ -31,8 +35,20 @@ int main(int argc, char **argv)
         if (argc == 3) {
                 niter = atoi(argv[2]);
         }
+	// set global var batch size if environmental var BS is defined
+	char* bs_env = getenv("BS");
+	int bs = (bs_env != NULL) ? atoi(bs_env) : 1;
+	if (bs <= 0) {
+		printf("Invalid batch size\n");
+		exit(EXIT_FAILURE);
+	}
+	batch_size = bs;
 
         // initialize buffers and parameters
+	float *x = malloc(batch_size * MAX_BUF_SIZE);
+	float *x2 = malloc(batch_size * MAX_BUF_SIZE);
+	int8_t *xq_q = malloc(batch_size * MAX_BUF_SIZE);
+	float *xq_s = malloc(batch_size * MAX_BUF_SIZE);
         for (int i = 0; i < MAX_BUF_SIZE; i++) {
                 float fval = (float) (rand() / RAND_MAX);
                 x[i] = fval;
@@ -96,7 +112,7 @@ int main(int argc, char **argv)
                 if (strcmp(function, "batchnorm") == 0) {
                         int nch = 64, h = 56, w = 56;
                         BnConfig bc = { nch, 0 };
-                        batchnorm(x2, x, p, bc, h, w);
+                        batchnorm(x2, x, p, bc, h * w);
                 }
                 if (strcmp(function, "maxpool") == 0) {
                         int nch = 64, h = 56, w = 56;
@@ -114,6 +130,9 @@ int main(int argc, char **argv)
                 if (strcmp(function, "softmax") == 0) {
                         softmax(x, MAX_BUF_SIZE);
                 }
+		if (strcmp(function, "matcopy_float") == 0) {
+                        matcopy_float(x2, x, MAX_BUF_SIZE);
+                }
                 if (strcmp(function, "quantize") == 0) {
                         int gs = 64;
                         quantize(&xq, x, MAX_BUF_SIZE, gs);
@@ -128,6 +147,8 @@ int main(int argc, char **argv)
         end = clock();
         float cpu_time = (float) (end - start) / CLOCKS_PER_SEC;
         printf("CPU time used: %f seconds\n", cpu_time);
+
+	free_run_state(x, x2, xq_q, xq_s);
 
 	return 0;
 }

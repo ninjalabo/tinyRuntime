@@ -2,6 +2,10 @@
 
 #include "properties.h"
 
+extern int batch_size;
+
+extern void read_imagenette_image(char **paths, float *images);
+
 extern void im2col(float *col, float *im, ConvConfig cc, int *height,
 		   int *width);
 
@@ -19,6 +23,8 @@ extern void avgpool(float *xout, float *x, int *height, int *width,
 extern void relu(float *x, int size);
 
 extern void softmax(float *x, int size);
+
+extern void matcopy_float(float *xout, float *x, int size);
 
 // Quantized
 extern void linear_q(float *xout, QuantizedTensor * x, int8_t * p, float *sf,
