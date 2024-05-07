@@ -15,8 +15,15 @@ LDFLAGS += $(if $(BLIS),-lblis,)
 LDFLAGS +=  $(if $(and $(filter clang,$(CC)),$(BLIS)),-I$(LIBBLIS_HOME)/include -L$(LIBBLIS_HOME)/lib,)
 SRC += $(if $(BLIS),func_blis.c,func.c)
 
-# use arm_neon.h if ARCH=arm
-SRC += $(if $(filter arm,$(ARCH)),func_q_arm.c,func_q.c)
+# add C module for quantized value calculations based on architecture
+ifeq ($(ARCH),arm)
+    SRC += func_q_arm.c
+else ifeq ($(ARCH),x86)
+    SRC += func_q_x86.c
+    CFLAGS += -mavx2 -mfma
+else
+    SRC += func_q.c
+endif
 
 compile: 
 	$(CC) $(CFLAGS) run.c $(SRC) -o run $(LDFLAGS)

@@ -47,10 +47,10 @@ jobs:
           ./ut
           pytest
 
-      - name: Run BLIS implementation
+      - name: Run optimized implementation
         run: |
-          make ut BLIS=1
-          make compile BLIS=1
+          make ut BLIS=1 ARCH=x86
+          make compile BLIS=1 ARCH=x86
           ./ut
           pytest
 
@@ -100,7 +100,7 @@ jobs:
           ./ut
           pytest
 
-      - name: Run BLIS implementation
+      - name: Run optimized implementation
         run: |
           make ut BLIS=1
           make compile BLIS=1
