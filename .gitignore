@@ -4,7 +4,6 @@ ut
 *.pkl
 *.nbconvert.ipynb
 .DS_Store
-.vscode
 data/imagenette2
 data/imagenette2.tgz
 /data
