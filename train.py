@@ -2,7 +2,7 @@
 
 from fastai.vision.all import *
 from huggingface_hub import from_pretrained_fastai, push_to_hub_fastai
-repo ='jkokko/'
+repo ='ninjalabo/'
 
 models = {
     'resnet18': resnet18,
@@ -26,8 +26,6 @@ def train_all(epochs=1):
     for model_name in models:
         learn = train(model_name, epochs)
         push_to_hub_fastai(learner=learn, repo_id=repo + model_name)
-        
-
 
 def load(model_name):
     learn = from_pretrained_fastai(repo_id=repo + model_name)
