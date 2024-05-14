@@ -24,6 +24,8 @@ extern void relu(float *x, int size);
 
 extern void softmax(float *x, int size);
 
+extern void find_max(int *xout, float *x, int nclasses);
+
 extern void matcopy_float(float *xout, float *x, int size);
 
 // Quantized
