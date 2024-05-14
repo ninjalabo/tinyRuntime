@@ -47,7 +47,7 @@ def test_runfiles(model_size, quantized=True, file_path=file_path):
     model = load(f"resnet{model_size}").model
     ref = calculate_reference_values(model, file_path)
     export_model(model)
-    command = ["./run", str(model_size), "model.bin", file_path]
+    command = ["./run", "test", str(model_size), "model.bin", file_path]
     res = execute(command)
 
     assert np.allclose(res, ref, atol=1e-5, rtol=0), "run.c: Probabilities are not close."
@@ -55,11 +55,11 @@ def test_runfiles(model_size, quantized=True, file_path=file_path):
     if quantized:
         # run quantized model test with group size = 1 and 2 in test mode
         export_modelq8(model, file_path="modelq8_1.bin", gs=1)
-        resq1 = execute(["./runq", str(model_size), "modelq8_1.bin", file_path])
+        resq1 = execute(["./runq", "test", str(model_size), "modelq8_1.bin", file_path])
         assert np.allclose(resq1, ref, atol=1e-5, rtol=0), "runq.c (group size = 1): Probabilities are not close."
 
         export_modelq8(model, file_path="modelq8_2.bin", gs=2)
-        resq2 = execute(["./runq", str(model_size), "modelq8_2.bin", file_path])
+        resq2 = execute(["./runq", "test", str(model_size), "modelq8_2.bin", file_path])
         assert np.allclose(resq2, ref, atol=2e-2, rtol=0), "runq.c (group size = 2):Probabilities are not close."
 
     print("Done")

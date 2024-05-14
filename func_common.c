@@ -231,6 +231,21 @@ void softmax(float *x, int size)
 	}
 }
 
+void find_max(int *xout, float *x, int nclasses)
+{
+	for (int bs = 0; bs < batch_size; bs++) {
+		float cmax = 0.0f;
+		int max_idx;
+		for (int i = 0; i < nclasses; i++) {
+			if (cmax < x[bs * nclasses + i]) {
+				cmax = x[bs * nclasses + i];
+				max_idx = i;
+			}
+		}
+		xout[bs] = max_idx;
+	}
+}
+
 void matcopy_float(float *xout, float *x, int size) {
 	memcpy(xout, x, batch_size * size * sizeof(float));
 }

@@ -7,6 +7,7 @@
 #include <sys/mman.h>
 #include <stdbool.h>
 #include <string.h>
+#include <ctype.h>
 
 #include "func.h"
 
@@ -227,7 +228,6 @@ static void basic_block(float *x, float *x2, float *x3, float *p,
 	relu(x2, lc[0].out);
 	batchnorm(x, x2, p, bc[1], 1);
 	linear(x2, x, p, lc[1]);
-	softmax(x2, lc[1].out);
 	matcopy_float(x, x2, lc[1].out);
 }
 
@@ -311,10 +311,45 @@ static void forward(Model *m, float *images, int model_size)
 	}
 }
 
+static void get_labels(int *labels, char **image_paths) {
+	for (int bs = 0; bs < batch_size; bs++) {
+		// move pointer to last occurence of /
+		char *start = strrchr(image_paths[bs], '/');
+		if (isdigit(*(--start))) {
+			labels[bs] = atoi(start);
+		} else {
+			printf("Label not found from path.\n");
+			exit(EXIT_FAILURE);
+		}
+	}
+}
+
+static void process_output(float *correct_count, float *x, int *labels,
+			   int *preds, int nclasses, int is_test) {
+	if (is_test) {
+		softmax(x, nclasses);
+		for (int bs = 0; bs < batch_size; bs++) {
+			for (int j = 0; j < nclasses; j++) {
+				printf("%f\t", x[bs * nclasses + j]);
+			}
+		printf("\n");
+		}
+	} else {
+		find_max(preds, x, nclasses);
+		for (int bs = 0; bs < batch_size; bs++) {
+			*correct_count += labels[bs] == preds[bs] ? 1 : 0;
+		}
+	}
+}
+
 static void error_usage()
 {
 	fprintf(stderr, "Usage:   run <model size> <model> <image>\n");
 	fprintf(stderr, "Example: run 18 resnet18.bin img1 img2 ... imgN\n");
+	fprintf(stderr, "\n");
+        fprintf(stderr, "Note: If you want to run a test, specify 'test' as the second argument.\n");
+	fprintf(stderr, "      This will output the class probability distribution for each image,\n");
+	fprintf(stderr, "      otherwise, it will output the accuracy along all images.\n\n");
 	exit(EXIT_FAILURE);
 }
 
@@ -336,41 +371,45 @@ int main(int argc, char **argv)
 	}
 	batch_size = bs;
 
-	int model_size = atoi(argv[1]);
-	model_path = argv[2];
+	// If the second argument is 'test', the program will output the class
+	// probability distribution for each image. Otherwise, it will output
+	// the accuracy along all images.
+	int is_test = strcmp(argv[1], "test") == 0;
+	int argv_idx = is_test ? 2 : 1;
+	int model_size = atoi(argv[argv_idx]);
+	model_path = argv[argv_idx + 1];
 	Model model;
 	build_model(&model, model_path);
 	float *images = malloc(batch_size * IMAGE_SZ * sizeof(float));
-	image_paths = &argv[3];
+	image_paths = &argv[argv_idx + 2];
 
-	int nimages = argc - 3;
+	int nimages = argc - argv_idx - 2;
 	int niter = nimages / batch_size;
 	int nclasses = model.model_config.nclasses;
+	int labels[batch_size];
+	int preds[batch_size];
+	float correct_count = 0.0;
 	for (int i = 0; i < niter; i++) {
+		get_labels(labels, &image_paths[i * batch_size]);
 		read_imagenette_image(&image_paths[i * batch_size], images);
 		forward(&model, images, model_size); // output (nclass,) is stored in model.state.x
-		for (int bs = 0; bs < batch_size; bs++) {
-			for (int j = 0; j < nclasses; j++) {
-				printf("%f\t",
-				       model.state.x[bs * nclasses + j]);
-			}
-			printf("\n");
-		}
+		process_output(&correct_count, model.state.x, labels, preds,
+			       nclasses, is_test);
 	}
 	// process the remaining images
 	batch_size = nimages % batch_size;
 	if (batch_size != 0) {
+		get_labels(labels, &image_paths[niter * batch_size]);
 		read_imagenette_image(&image_paths[niter * batch_size], images);
 		forward(&model, images, model_size);
-		for (int bs = 0; bs < batch_size; bs++) {
-			for (int j = 0; j < model.model_config.nclasses; j++) {
-				printf("%f\t", model.state.x[j]);
-			}
-			printf("\n");
-		}
+		process_output(&correct_count, model.state.x, labels, preds,
+			       nclasses, is_test);
 	}
 
+	if (!is_test) {
+		printf("%f\n", 100 * correct_count / nimages);
+	}
 	free(images);
 	free_model(&model);
 	return 0;
-	}
+}
