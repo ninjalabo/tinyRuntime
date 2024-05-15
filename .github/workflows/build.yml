@@ -3,10 +3,8 @@ name: Testing workflow
 
 on:
   push:
-    paths: ['Makefile', '.github/workflows/**', '*.c', test_all.py]
   pull_request:
     types: [opened, synchronize, reopened]
-    paths: ['Makefile', '.github/workflows/**', '*.c', test_all.py]
   workflow_dispatch:
 
 jobs:
