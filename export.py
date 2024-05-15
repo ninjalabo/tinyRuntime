@@ -5,6 +5,7 @@ import struct
 import numpy as np
 from sympy import divisors
 import copy
+from fasterai.misc.bn_folding import *
 
 def serialize_fp32(file, tensor):
     ''' Write one fp32 tensor to file that is open in wb mode '''
@@ -44,22 +45,6 @@ def quantize_q80(w, group_size):
     maxerr = err.max().item()
     return int8val, scale, maxerr
 
-def fold_batchnorm(cnn, bn) :
-    ''' Fold batchnorm layer into convolutional layer '''
-
-    # apply batchnorm folding
-    var = 1 / torch.sqrt(bn.running_var + bn.eps)
-    w_fold = cnn.weight.data * (bn.weight.data * var).view(-1,1,1,1)
-    cnn.weight.data = w_fold
-
-    if cnn.bias is None:
-        cnn.bias = torch.nn.Parameter(torch.zeros(cnn.weight.shape[0])) # initialize bias as 0 if doesn't exist
-
-    b_fold = bn.weight.data * (cnn.bias.data - bn.running_mean) * var + bn.bias.data
-    cnn.bias.data = b_fold
-    
-
-
 def export_model(model, file_path="model.bin"):
     '''
     Export the quantized model to a file
@@ -68,13 +53,11 @@ def export_model(model, file_path="model.bin"):
     2. CNN, FC and BN layers' configuration
     3. CNN, FC and BN layers' parameters
     '''
-    model = copy.deepcopy(model)
+    # batchnorm folding
+    model = BN_Folder().fold(model)
     f = open(file_path, "wb")
     # write model config
     conv_layers = [layer for layer in model.modules() if isinstance(layer, torch.nn.Conv2d)]
-    bn_layers = [layer for layer in model.modules() if isinstance(layer, torch.nn.BatchNorm2d)]
-    for conv_layer, bn_layer in zip(conv_layers, bn_layers):
-        fold_batchnorm(conv_layer, bn_layer) # fold batchnorm2d layers into convolutional layers
     nconv = len(conv_layers)
     # read batchnorm1d layers to which batchnorm folding cannot be applied
     bn_layers = [layer for layer in model.modules() if isinstance(layer, torch.nn.BatchNorm1d)]
