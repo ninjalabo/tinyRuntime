@@ -7,3 +7,4 @@ jupyter
 toml
 huggingface_hub
 fastai
+fasterai
