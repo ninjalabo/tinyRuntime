@@ -285,7 +285,7 @@ static void basic_block(float *x, float *x2, float *x3, float *p,
 	tail(x, x2, x3, p, cc, lc, bc, h, w, i);
 }
 
-static void forward(Model *m, float *images, int model_size)
+static void forward(Model *m, float *images)
 {
 	ConvConfig *cc = m->conv_config;
 	LinearConfig *lc = m->linear_config;
@@ -299,11 +299,12 @@ static void forward(Model *m, float *images, int model_size)
 	int h = 224; // height
 	int w = 224; // width
 
-	if (model_size == 18)
+	int nconv = m->model_config.nconv;
+	if (nconv == 20)
 		resnet18(x, x2, x3, images, p, cc, lc, bc, h, w);
-	else if (model_size == 34)
+	else if (nconv == 36)
 		resnet34(x, x2, x3, images, p, cc, lc, bc, h, w);
-	else if (model_size == 50)
+	else if (nconv == 53)
 		resnet50(x, x2, x3, images, p, cc, lc, bc, h, w);
 	else {
 		fprintf(stderr, "Invalid structure size\n");
@@ -344,8 +345,8 @@ static void process_output(float *correct_count, float *x, int *labels,
 
 static void error_usage()
 {
-	fprintf(stderr, "Usage:   run <model size> <model> <image>\n");
-	fprintf(stderr, "Example: run 18 resnet18.bin img1 img2 ... imgN\n");
+	fprintf(stderr, "Usage:   run <model> <image>\n");
+	fprintf(stderr, "Example: run resnet18.bin img1 img2 ... imgN\n");
 	fprintf(stderr, "\n");
         fprintf(stderr, "Note: If you want to run a test, specify 'test' as the second argument.\n");
 	fprintf(stderr, "      This will output the class probability distribution for each image,\n");
@@ -359,7 +360,7 @@ int main(int argc, char **argv)
 	char **image_paths = NULL;
 
 	// read images and model path, then outputs the probability distribution for the given images.
-	if (argc < 4) {
+	if (argc < 3) {
 		error_usage();
 	}
 	// set global var batch size if environmental var BS is defined
@@ -376,14 +377,13 @@ int main(int argc, char **argv)
 	// the accuracy along all images.
 	int is_test = strcmp(argv[1], "test") == 0;
 	int argv_idx = is_test ? 2 : 1;
-	int model_size = atoi(argv[argv_idx]);
-	model_path = argv[argv_idx + 1];
+	model_path = argv[argv_idx];
 	Model model;
 	build_model(&model, model_path);
 	float *images = malloc(batch_size * IMAGE_SZ * sizeof(float));
-	image_paths = &argv[argv_idx + 2];
+	image_paths = &argv[argv_idx + 1];
 
-	int nimages = argc - argv_idx - 2;
+	int nimages = argc - argv_idx - 1;
 	int niter = nimages / batch_size;
 	int nclasses = model.model_config.nclasses;
 	int labels[batch_size];
@@ -392,7 +392,7 @@ int main(int argc, char **argv)
 	for (int i = 0; i < niter; i++) {
 		get_labels(labels, &image_paths[i * batch_size]);
 		read_imagenette_image(&image_paths[i * batch_size], images);
-		forward(&model, images, model_size); // output (nclass,) is stored in model.state.x
+		forward(&model, images); // output (nclass,) is stored in model.state.x
 		process_output(&correct_count, model.state.x, labels, preds,
 			       nclasses, is_test);
 	}
@@ -401,7 +401,7 @@ int main(int argc, char **argv)
 	if (batch_size != 0) {
 		get_labels(labels, &image_paths[niter * batch_size]);
 		read_imagenette_image(&image_paths[niter * batch_size], images);
-		forward(&model, images, model_size);
+		forward(&model, images);
 		process_output(&correct_count, model.state.x, labels, preds,
 			       nclasses, is_test);
 	}
