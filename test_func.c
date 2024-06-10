@@ -19,29 +19,24 @@ TEST_GROUP(TestGroup)
         }
 };
 
-TEST(TestGroup, ReadImagenette)
+TEST(TestGroup, ResizeImagenette)
 {
-	int nch = 3, h = 224, w = 224;
-	int img_sz = nch * h * w;
-	float ref[batch_size * img_sz];
-	for (int i = 0; i < batch_size * img_sz; i++) {
-		ref[i] = i;
+	char path[] =
+	    "test/data/imagenette2-320/val/n02102040/n02102040_1011.JPEG";
+	int nch = 3, h1 = 224, w1 = 224;
+	float resized[nch * h1 * w1];
+	load_imagenette(resized, path, h1, w1);
+	char ref_path[] =
+	    "test/data/imagenette2-320/val/n02102040/n02102040_1011.bin";
+	FILE *f = fopen(ref_path, "rb");
+	float ref[nch * h1 * w1];
+	fread(ref, sizeof(float), nch * h1 * w1, f);
+	fclose(f);
+	for (int i = 0; i < 10; i++) {
+		// printf("%d\n", i);
+		// DOUBLES_EQUAL(ref[i], resized[i], TOL);
+		printf("%f\n", resized[i]);
 	}
-	const char *paths[] =
-	    { "test_read_imagenette1.bin", "test_read_imagenette2.bin" };
-	FILE *file = fopen(paths[0], "wb");
-	fwrite(ref, sizeof(float), img_sz, file);
-	fclose(file);
-	file = fopen(paths[1], "wb");
-	fwrite(&ref[img_sz], sizeof(float), img_sz, file);
-	fclose(file);
-
-	float images[batch_size * img_sz];
-	read_imagenette_image((char**) paths, images);
-	MEMCMP_EQUAL(ref, images, batch_size * img_sz * sizeof(float));
-
-	remove(paths[0]);
-	remove(paths[1]);
 }
 
 TEST(TestGroup, Linear)

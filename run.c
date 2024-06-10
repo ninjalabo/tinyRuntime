@@ -8,6 +8,7 @@
 #include <stdbool.h>
 #include <string.h>
 #include <ctype.h>
+#include <dirent.h>
 
 #include "func.h"
 
@@ -312,19 +313,6 @@ static void forward(Model *m, float *images)
 	}
 }
 
-static void get_labels(int *labels, char **image_paths) {
-	for (int bs = 0; bs < batch_size; bs++) {
-		// move pointer to last occurence of /
-		char *start = strrchr(image_paths[bs], '/');
-		if (isdigit(*(--start))) {
-			labels[bs] = atoi(start);
-		} else {
-			printf("Label not found from path.\n");
-			exit(EXIT_FAILURE);
-		}
-	}
-}
-
 static void process_output(float *correct_count, float *x, int *labels,
 			   int *preds, int nclasses, int is_test) {
 	if (is_test) {
@@ -343,6 +331,100 @@ static void process_output(float *correct_count, float *x, int *labels,
 	}
 }
 
+static void iterate_subdirectory(Model *m, int *labels, int *preds,
+			  	float *resized_images, char *dir_name,
+				int label, int *correct_count,
+				int *batch_index, int is_test) {
+	DIR *dir;
+	struct dirent *entry;
+	// open the directory
+	if ((dir = opendir(dir_name)) == NULL) {
+		fprintf(stderr, "Directory open failed\n");
+		exit(EXIT_FAILURE);
+	}
+	// iterate through each entry in the directory
+	while ((entry = readdir(dir)) != NULL) {
+		if (strcmp(entry->d_name, ".") == 0 ||
+		    strcmp(entry->d_name, "..") == 0) {
+			continue;
+		}
+		// construct the path to the entry
+		size_t path_len = strlen(dir_name) + strlen(entry->d_name) + 2;
+		char *path = malloc(path_len);
+		snprintf(path, path_len, "%s/%s", dir_name, entry->d_name);
+
+		int h = 224, w = 224;
+		load_imagenette(&resized_images[(*batch_index) * IMAGE_SZ],
+				path, h, w);
+		labels[*batch_index] = label;
+
+		*batch_index += 1;
+		if (*batch_index == batch_size) {
+			forward(m, resized_images);
+			int nclasses = m->model_config.nclasses;
+			float *output = m->state.x;
+			process_output(correct_count, output, labels, preds,
+				       nclasses, is_test);
+			*batch_index = 0;
+		}
+		free(path);
+	}
+
+	// Close the directory
+	closedir(dir);
+}
+
+static void iterate_directory(Model *m, char *base_path, int is_test) {
+	DIR *dir;
+	struct dirent *entry;
+	// open the base directory
+	if ((dir = opendir(base_path)) == NULL) {
+		fprintf(stderr, "Directory open failed\n");
+		exit(EXIT_FAILURE);
+	}
+	// iterate through each subdir
+	int label = 0;
+	int batch_index = 0;
+	int nimages = 0;
+	int correct_count = 0;
+	float *resized_images = malloc(batch_size * IMAGE_SZ * sizeof(float));
+	int labels[batch_size];
+	int preds[batch_size];
+	while ((entry = readdir(dir)) != NULL) {
+		if (strcmp(entry->d_name, ".") == 0 ||
+		    strcmp(entry->d_name, "..") == 0) {
+			continue;
+		}
+		// construct the path to the subdirectory
+		size_t path_len = strlen(base_path) + strlen(entry->d_name) + 2;
+		char *path = malloc(path_len);
+		snprintf(path, path_len, "%s/%s", base_path, entry->d_name);
+
+		if (entry->d_type == DT_DIR) {
+			iterate_subdirectory(m, labels, preds, resized_images,
+					     path, label, &correct_count,
+					     &batch_index, is_test);
+			nimages += batch_index == 0 ? batch_size : batch_index;
+		}
+		label += 1;
+		free(path);
+	}
+	// process any remaining images in the batch
+	if (batch_index > 0) {
+		forward(m, resized_images);
+		int nclasses = m->model_config.nclasses;
+		float *output = m->state.x;
+		process_output(&correct_count, output, labels, preds, nclasses,
+			       is_test);
+	}
+	// close the directory
+	closedir(dir);
+	if (!is_test) {
+		printf("%f\n", 100.0f * correct_count / nimages);
+	}
+	free(resized_images);
+}
+
 static void error_usage()
 {
 	fprintf(stderr, "Usage:   run <model> <image>\n");
@@ -357,13 +439,12 @@ static void error_usage()
 int main(int argc, char **argv)
 {
 	char *model_path = NULL;
-	char **image_paths = NULL;
+	char *dir_path = NULL;
 
-	// read images and model path, then outputs the probability distribution for the given images.
 	if (argc < 3) {
 		error_usage();
 	}
-	// set global var batch size if environmental var BS is defined
+	// set global var 'batch_size' if environmental var BS is defined
 	char* bs_env = getenv("BS");
 	int bs = (bs_env != NULL) ? atoi(bs_env) : 1;
 	if (bs <= 0) {
@@ -380,36 +461,9 @@ int main(int argc, char **argv)
 	model_path = argv[argv_idx];
 	Model model;
 	build_model(&model, model_path);
-	float *images = malloc(batch_size * IMAGE_SZ * sizeof(float));
-	image_paths = &argv[argv_idx + 1];
+	// iterate through the data directory and run the model
+	iterate_directory(&model, dir_path, is_test);
 
-	int nimages = argc - argv_idx - 1;
-	int niter = nimages / batch_size;
-	int nclasses = model.model_config.nclasses;
-	int labels[batch_size];
-	int preds[batch_size];
-	float correct_count = 0.0;
-	for (int i = 0; i < niter; i++) {
-		get_labels(labels, &image_paths[i * batch_size]);
-		read_imagenette_image(&image_paths[i * batch_size], images);
-		forward(&model, images); // output (nclass,) is stored in model.state.x
-		process_output(&correct_count, model.state.x, labels, preds,
-			       nclasses, is_test);
-	}
-	// process the remaining images
-	batch_size = nimages % batch_size;
-	if (batch_size != 0) {
-		get_labels(labels, &image_paths[niter * batch_size]);
-		read_imagenette_image(&image_paths[niter * batch_size], images);
-		forward(&model, images);
-		process_output(&correct_count, model.state.x, labels, preds,
-			       nclasses, is_test);
-	}
-
-	if (!is_test) {
-		printf("%f\n", 100 * correct_count / nimages);
-	}
-	free(images);
 	free_model(&model);
 	return 0;
 }

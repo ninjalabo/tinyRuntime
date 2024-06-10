@@ -4,7 +4,7 @@
 
 extern int batch_size;
 
-extern void read_imagenette_image(char **paths, float *images);
+extern void load_imagenette(float *resized, char *filename, int h1, int w1);
 
 extern void im2col(float *col, float *im, ConvConfig cc, int *height,
 		   int *width);
