@@ -15,7 +15,7 @@ RUN pip3 install torch torchvision --index-url https://download.pytorch.org/whl/
 RUN pip install fastai fasterai
 CMD python prep_model.py
 # To build and push docker image, run: 
-# docker buildx build --target compiler --push --platform linux/arm64,linux/amd64 -t ninjalabo/compiler-export-models:latest .
+# docker buildx build --target compiler --push --platform linux/arm64,linux/amd64 -t ninjalabo/compiler-export-models:1.x .
 
 # COMPILING TINYRUNTIME INFERENCES STATICALLY
 # By following instructions below, you can compile tinyRuntime inferences statically, and store it in https://github.com/ninjalabo/inferences
