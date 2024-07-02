@@ -1,0 +1,48 @@
+
+name: compiler-test
+
+on:
+  push:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+jobs:
+  compiler-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Clone
+        id: checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Prepare environment
+        run: |
+          git clone https://huggingface.co/ninjalabo/resnet18 && cp resnet18/model.pkl test/model.pkl
+          sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Build Docker image
+        run: docker build --target compiler -t ninjalabo/compiler-export-models .
+
+      - name: Test model export
+        run: |
+          docker run --rm -v $(pwd)/test:/root/md ninjalabo/compiler-export-models
+          if [ ! -f test/model.bin ]; then
+            echo "Error: test/model.bin does not exist"
+            exit 1
+          fi
+          SIZE=$(stat -c %s test/model.bin)
+
+          jq '.compression.quantization = true' test/runtime_info.json > temp.json && mv temp.json test/runtime_info.json
+          docker run --rm -v $(pwd)/test:/root/md ninjalabo/compiler-export-models
+          QUANT_SIZE=$(stat -c %s test/model.bin)
+          if [ $QUANT_SIZE -ge $SIZE ]; then
+            echo "Error: Quantized model is not smaller than non-quantized model"
+            exit 1
+          fi
