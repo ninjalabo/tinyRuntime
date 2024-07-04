@@ -43,14 +43,14 @@ jobs:
           make ut
           make compile
           ./ut
-          pytest
+          pytest test_all.py
 
       - name: Run optimized implementation
         run: |
           make ut BLIS=1 ARCH=x86
           make compile BLIS=1 ARCH=x86
           ./ut
-          pytest
+          pytest test_all.py
 
       - name: Run Python notebooks
         run: |
@@ -94,14 +94,14 @@ jobs:
           make ut
           make compile
           ./ut
-          pytest
+          pytest test_all.py
 
       - name: Run optimized implementation
         run: |
           make ut BLIS=1
           make compile BLIS=1
           ./ut
-          pytest
+          pytest test_all.py
 
       - name: Run Python notebooks
         run: |

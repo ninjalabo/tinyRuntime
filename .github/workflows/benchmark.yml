@@ -1,0 +1,95 @@
+name: benchmark
+on:
+  push:
+
+permissions:
+  contents: write
+  deployments: write
+
+jobs:
+  benchmark-linux:
+    name: Run tinyRuntime on x86
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: 3.9
+
+      - name: Dependencies
+        id: depends
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libatlas-base-dev
+          git clone https://github.com/flame/blis.git
+          cd blis
+          ./configure -t openmp auto
+          make -j
+          sudo make install
+          sudo ldconfig
+
+      - name: Prepare test environment
+        run: |
+          make compile BLIS=1 ARCH=x86
+          git clone --branch 1.x https://huggingface.co/datasets/ninjalabo/imagenette2-320 data
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: Run benchmark
+        run: |
+          pytest benchmark.py --benchmark-json output-linux.json
+
+      - name: Store benchmark result to separate repo
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: Python Benchmark x86
+          tool: 'pytest'
+          output-file-path: output-linux.json
+          # Use personal access token instead of GITHUB_TOKEN due to https://github.community/t/github-action-not-triggering-gh-pages-upon-push/16096
+          github-token: ${{ secrets.GH_WORKFLOW_TOKEN }}
+          auto-push: true
+          # Show alert with commit comment on detecting possible performance regression
+          alert-threshold: '125%'
+          comment-on-alert: true
+          fail-on-alert: true
+          gh-repository: 'github.com/ninjalabo/benchmark'
+
+  benchmark-mac:
+    name: Run tinyRuntime on ARM
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: 3.9
+
+      - name: Dependencies
+        id: depends
+        run: |
+          brew update
+          brew install blis llvm libomp
+          export PATH="/usr/local/opt/llvm/bin:$PATH"
+
+      - name: Prepare test environment
+        run: |
+          make compile BLIS=1 ARCH=arm
+          git clone --branch 1.x https://huggingface.co/datasets/ninjalabo/imagenette2-320 data
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: Run benchmark
+        run: |
+          pytest benchmark.py --benchmark-json output-mac.json
+
+      - name: Store benchmark result to separate repo
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: Python Benchmark ARM
+          tool: 'pytest'
+          output-file-path: output-mac.json
+          github-token: ${{ secrets.GH_WORKFLOW_TOKEN }}
+          auto-push: true
+          alert-threshold: '125%'
+          comment-on-alert: true
+          fail-on-alert: true
+          gh-repository: 'github.com/ninjalabo/benchmark'
