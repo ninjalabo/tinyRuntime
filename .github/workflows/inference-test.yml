@@ -1,5 +1,5 @@
 
-name: Testing workflow
+name: inference-test
 
 on:
   push:
