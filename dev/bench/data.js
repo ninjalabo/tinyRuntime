@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1720141734778,
+  "lastUpdate": 1720142325123,
   "repoUrl": "https://github.com/ninjalabo/tinyRuntime",
   "entries": {
     "Python Benchmark with pytest-benchmark": [
@@ -62,6 +62,37 @@ window.BENCHMARK_DATA = {
             "unit": "iter/sec",
             "range": "stddev: 1.7996528694014262e-8",
             "extra": "mean: 95.81355121608601 nsec\nrounds: 103542"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "haru.doyu@gmail.com",
+            "name": "hd702",
+            "username": "harukadoyu"
+          },
+          "committer": {
+            "email": "haru.doyu@gmail.com",
+            "name": "hd702",
+            "username": "harukadoyu"
+          },
+          "distinct": true,
+          "id": "278e51a38c4aadaa10188e028f2294a35211f20d",
+          "message": "fixup",
+          "timestamp": "2024-07-05T04:08:20+03:00",
+          "tree_id": "d5a60f7de27d0af4d2cbecb3f5862fc4d0cb4d72",
+          "url": "https://github.com/ninjalabo/tinyRuntime/commit/278e51a38c4aadaa10188e028f2294a35211f20d"
+        },
+        "date": 1720142321096,
+        "tool": "pytest",
+        "benches": [
+          {
+            "name": "bench.py::test_all",
+            "value": 10633712.015123408,
+            "unit": "iter/sec",
+            "range": "stddev: 1.1540092527383516e-8",
+            "extra": "mean: 94.04053810912895 nsec\nrounds: 103864"
           }
         ]
       }
