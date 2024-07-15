@@ -1,6 +1,10 @@
 name: benchmark
+# Run the workflow if C files are modified
 on:
   push:
+    paths:
+      - '**/*.c'
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -8,7 +12,7 @@ permissions:
 
 jobs:
   benchmark-linux:
-    name: Run tinyRuntime on x86
+    name: Benchmark on x86
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -32,30 +36,28 @@ jobs:
         run: |
           make compile BLIS=1 ARCH=x86
           git clone --branch 1.x https://huggingface.co/datasets/ninjalabo/imagenette2-320 data
+          git clone https://huggingface.co/ninjalabo/resnet18 && cp resnet18/model.pkl .
+          wget https://raw.githubusercontent.com/ninjalabo/inferences/main/run.py
           python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          pip install toml psutil huggingface_hub fastai fasterai
 
-      - name: Run benchmark
+      - name: Download benchmark.csv
         run: |
-          pytest benchmark.py --benchmark-json output-linux.json
+          wget https://raw.githubusercontent.com/ninjalabo/ninjalabo.github.io/main/benchmark.csv || true
 
-      - name: Store benchmark result to separate repo
-        uses: benchmark-action/github-action-benchmark@v1
+      - name: Run benchmark # Update benchmark.csv by appending new results
+        run: |
+          python benchmark.py
+
+      - name: Upload benchmark-linux
+        uses: actions/upload-artifact@v4
         with:
-          name: Python Benchmark x86
-          tool: 'pytest'
-          output-file-path: output-linux.json
-          # Use personal access token instead of GITHUB_TOKEN due to https://github.community/t/github-action-not-triggering-gh-pages-upon-push/16096
-          github-token: ${{ secrets.GH_WORKFLOW_TOKEN }}
-          auto-push: true
-          # Show alert with commit comment on detecting possible performance regression
-          alert-threshold: '125%'
-          comment-on-alert: true
-          fail-on-alert: true
-          gh-repository: 'github.com/ninjalabo/benchmark'
+          name: benchmark-x86
+          path: benchmark.csv
 
   benchmark-mac:
-    name: Run tinyRuntime on ARM
+    name: Benchmark on ARM
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -74,22 +76,56 @@ jobs:
         run: |
           make compile BLIS=1 ARCH=arm
           git clone --branch 1.x https://huggingface.co/datasets/ninjalabo/imagenette2-320 data
+          git clone https://huggingface.co/ninjalabo/resnet18 && cp resnet18/model.pkl .
+          wget https://raw.githubusercontent.com/ninjalabo/inferences/main/run.py
           python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          pip install toml psutil huggingface_hub fastai fasterai
 
-      - name: Run benchmark
+      - name: Run benchmark # Save results to benchmark.csv
         run: |
-          pytest benchmark.py --benchmark-json output-mac.json
+          python benchmark.py
 
-      - name: Store benchmark result to separate repo
-        uses: benchmark-action/github-action-benchmark@v1
+      - name: Upload benchmark-mac
+        uses: actions/upload-artifact@v4
         with:
-          name: Python Benchmark ARM
-          tool: 'pytest'
-          output-file-path: output-mac.json
-          github-token: ${{ secrets.GH_WORKFLOW_TOKEN }}
-          auto-push: true
-          alert-threshold: '125%'
-          comment-on-alert: true
-          fail-on-alert: true
-          gh-repository: 'github.com/ninjalabo/benchmark'
+          name: benchmark-arm
+          path: benchmark.csv
+
+  benchmark-combine:
+    name: Push Final Benchmark Results
+    runs-on: ubuntu-latest
+    needs: [benchmark-linux, benchmark-mac]
+    steps:
+      - uses: actions/checkout@v4
+
+      # Download benchmark.csv from benchmark-linux that contains new x86 results and all previous results
+      - name: Download benchmark-x86
+        uses: actions/download-artifact@v4
+        with:
+          name: benchmark-x86
+          path: x86
+
+      # Download benchmark.csv from benchmark-mac that contains new ARM results
+      - name: Download benchmark-arm
+        uses: actions/download-artifact@v4
+        with:
+          name: benchmark-arm
+          path: arm
+
+      - name: Combine benchmark results
+        run: |
+           cat arm/benchmark.csv | tail -n +2 >> x86/benchmark.csv
+           mv x86/benchmark.csv benchmark.csv
+
+      - name: Pushes the output file to another repository
+        uses: dmnemec/copy_file_to_another_repo_action@main
+        env:
+          API_TOKEN_GITHUB: ${{ secrets.GH_WORKFLOW_TOKEN }}
+        with:
+          source_file: 'benchmark.csv'
+          destination_repo: 'ninjalabo/ninjalabo.github.io'
+          destination_branch: 'main'
+          user_email: "action@github.com"
+          user_name: "GitHub Action"
+          commit_message: 'update benchmark.csv'

@@ -98,8 +98,8 @@ jobs:
 
       - name: Run optimized implementation
         run: |
-          make ut BLIS=1
-          make compile BLIS=1
+          make ut BLIS=1 ARCH=arm
+          make compile BLIS=1 ARCH=arm
           ./ut
           pytest test_all.py
 
