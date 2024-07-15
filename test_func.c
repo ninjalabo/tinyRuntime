@@ -37,7 +37,7 @@ TEST(TestGroup, ReadImagenette)
 	fclose(file);
 
 	float images[batch_size * img_sz];
-	read_imagenette_image((char**) paths, images);
+	read_imagenette_image((char**) paths, images, batch_size);
 	MEMCMP_EQUAL(ref, images, batch_size * img_sz * sizeof(float));
 
 	remove(paths[0]);

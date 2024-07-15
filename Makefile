@@ -19,7 +19,11 @@ SRC += $(if $(BLIS),func_blis.c,func.c)
 
 # add -lm and -fopenmp after -lblis so that symbols from the libraries are available to resolve references in BLIS
 LDFLAGS += -lm
-LDFLAGS += $(if $(STATIC),-fopenmp,) # TODO: add this always later once OpenMP is added to the codes
+
+# add OpenMP flags
+LDFLAGS += $(if $(filter clang,$(CC)),-lomp -Xpreprocessor -fopenmp,-fopenmp)
+OPENMP_HOME := $(if $(filter clang,$(CC)),$(shell brew --prefix libomp),)
+LDFLAGS += $(if $(OPENMP_HOME),-I$(OPENMP_HOME)/include -L$(OPENMP_HOME)/lib,)
 
 # add C module for quantized value calculations based on architecture
 ifeq ($(ARCH),arm)

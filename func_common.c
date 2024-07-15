@@ -12,17 +12,17 @@ int batch_size = 1;
 
 // TODO: optimize batch processing in all func*.c modules
 
-void read_imagenette_image(char **paths, float *images)
+void read_imagenette_image(char **paths, float *images, int bs)
 {
 	int nch = 3, h = 224, w = 224;
 	size_t img_sz = nch * h * w;
-	for (int bs = 0; bs < batch_size; bs++) {
-		FILE *file = fopen(paths[bs], "rb");
+	for (int b = 0; b < bs; b++) {
+		FILE *file = fopen(paths[b], "rb");
 		if (!file) {
-			fprintf(stderr, "Couldn't open file %s\n", paths[bs]);
+			fprintf(stderr, "Couldn't open file %s\n", paths[b]);
 			exit(EXIT_FAILURE);
 		}
-		if (fread(&images[bs * img_sz], sizeof(float),
+		if (fread(&images[b * img_sz], sizeof(float),
 		    img_sz, file) != img_sz) {
 			fprintf(stderr, "Image read failed\n");
 			exit(EXIT_FAILURE);

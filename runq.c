@@ -8,6 +8,7 @@
 #include <stdbool.h>
 #include <string.h>
 #include <ctype.h>
+#include <omp.h>
 
 #include "func.h"
 #include "func_q.h"
@@ -22,7 +23,7 @@ typedef struct {
 	float *x2;
 	float *x3;
 	QuantizedTensor xq;	// buffer for quantized arrays
-} Runstate;
+} Runstate;		// the current state in the forward pass
 
 typedef struct {
 	ModelConfigQ model_config;
@@ -31,7 +32,6 @@ typedef struct {
 	BnConfig *bn_config;	// batchnorm layers' config
 	int8_t *parameters;	// array of all weigths and biases
 	float *scaling_factors;	// array of all scaling factors
-	Runstate state;		// the current state in the forward pass
 	int fd;			// file descriptor for memory mapping
 	float *data;		// memory mapped data pointer
 	size_t file_size;	// size of the checkpoint file in bytes
@@ -101,8 +101,6 @@ static void build_model(Model * m, char *checkpoint_path)
 	read_checkpoint(checkpoint_path, &m->model_config, &m->conv_config,
 			&m->linear_config, &m->bn_config, &m->parameters,
 			&m->scaling_factors, &m->fd, &m->data, &m->file_size);
-	// allocate the RunState buffers
-	malloc_run_state(&m->state);
 }
 
 static void free_model(Model * m)
@@ -114,8 +112,6 @@ static void free_model(Model * m)
 	if (m->fd != -1) {
 		close(m->fd);
 	}
-	// free the RunState buffers
-	free_run_state(&m->state);
 }
 
 #ifdef DEBUG
@@ -353,14 +349,13 @@ static void basic_block(QuantizedTensor *xq, float *x, float *x2, float *x3,
 	tail(xq, x, x2, x3, p, sf, cc, lc, bc, h, w, i);
 }
 
-static void forward(Model *m, float *images)
+static void forward(Model *m, Runstate *s, float *images)
 {
 	ConvConfigQ *cc = m->conv_config;
 	LinearConfigQ *lc = m->linear_config;
 	BnConfig *bc = m->bn_config;
 	int8_t *p = m->parameters;
 	float *sf = m->scaling_factors;
-	Runstate *s = &m->state;
 	float *x = s->x;
 	float *x2 = s->x2;
 	float *x3 = s->x3;
@@ -369,6 +364,7 @@ static void forward(Model *m, float *images)
 	int h = 224; // height
 	int w = 224; // width
 
+	// select the right model based on the number of convolutional layers
 	int nconv = m->model_config.nconv;
 	if (nconv == 20)
 		resnet18(&xq, x, x2, x3, images, p, sf, cc, lc, bc, h, w);
@@ -377,38 +373,38 @@ static void forward(Model *m, float *images)
 	else if (nconv == 53)
 		resnet50(&xq, x, x2, x3, images, p, sf, cc, lc, bc, h, w);
 	else {
-		fprintf(stderr, "Invalid structure size\n");
+		fprintf(stderr, "Invalid structure size. Make sure you have the right model.\n");
 		exit(EXIT_FAILURE);
 	}
 }
 
-static void get_labels(int *labels, char **image_paths) {
-	for (int bs = 0; bs < batch_size; bs++) {
+static void get_labels(int *labels, char **image_paths, int bs) {
+	for (int b = 0; b < bs; b++) {
 		// move pointer to last occurence of /
-		char *start = strrchr(image_paths[bs], '/');
+		char *start = strrchr(image_paths[b], '/');
 		if (isdigit(*(--start))) {
-			labels[bs] = atoi(start);
+			labels[b] = atoi(start);
 		} else {
-			printf("Label not found from path.\n");
+			fprintf(stderr, "Label not found from path.\n");
 			exit(EXIT_FAILURE);
 		}
 	}
 }
 
-static void process_output(float *correct_count, float *x, int *labels,
-			   int *preds, int nclasses, int is_test) {
+static void process_output(int *correct_count, float *x, int *labels,
+			   int *preds, int nclasses, int is_test, int bs) {
 	if (is_test) {
 		softmax(x, nclasses);
-		for (int bs = 0; bs < batch_size; bs++) {
+		for (int b = 0; b < bs; b++) {
 			for (int j = 0; j < nclasses; j++) {
-				printf("%f\t", x[bs * nclasses + j]);
+				printf("%f\t", x[b * nclasses + j]);
 			}
 		printf("\n");
 		}
 	} else {
 		find_max(preds, x, nclasses);
-		for (int bs = 0; bs < batch_size; bs++) {
-			*correct_count += labels[bs] == preds[bs] ? 1 : 0;
+		for (int b = 0; b < bs; b++) {
+			*correct_count += labels[b] == preds[b] ? 1 : 0;
 		}
 	}
 }
@@ -418,11 +414,12 @@ static void error_usage()
 	fprintf(stderr, "Usage:   runq <model> <image>\n");
 	fprintf(stderr, "Example: runq resnet18q.bin img1 img2 ... imgN\n");
 	fprintf(stderr, "\n");
-        fprintf(stderr, "Note: If you want to run a test, specify 'test' as the second argument.\n");
+	fprintf(stderr, "Note: If you want to run a test, specify 'test' as the second argument.\n");
 	fprintf(stderr, "      This will output the class probability distribution for each image,\n");
 	fprintf(stderr, "      otherwise, it will output the accuracy along all images.\n\n");
 	exit(EXIT_FAILURE);
 }
+
 
 int main(int argc, char **argv)
 {
@@ -437,7 +434,7 @@ int main(int argc, char **argv)
 	char* bs_env = getenv("BS");
 	int bs = (bs_env != NULL) ? atoi(bs_env) : 1;
 	if (bs <= 0) {
-		printf("Invalid batch size\n");
+		fprintf(stderr, "Invalid batch size\n");
 		exit(EXIT_FAILURE);
 	}
 	batch_size = bs;
@@ -447,39 +444,70 @@ int main(int argc, char **argv)
 	// the accuracy along all images.
 	int is_test = strcmp(argv[1], "test") == 0;
 	int argv_idx = is_test ? 2 : 1;
+	// build model
 	model_path = argv[argv_idx];
 	Model model;
 	build_model(&model, model_path);
-	float *images = malloc(batch_size * IMAGE_SZ * sizeof(float));
+	// define variables
 	image_paths = &argv[argv_idx + 1];
-
 	int nimages = argc - argv_idx - 1;
-	int niter = nimages / batch_size;
+	int niter = (nimages - 1) / batch_size + 1;
 	int nclasses = model.model_config.nclasses;
-	int labels[batch_size];
-	int preds[batch_size];
-	float correct_count = 0.0;
-	for (int i = 0; i < niter; i++) {
-		get_labels(labels, &image_paths[i * batch_size]);
-		read_imagenette_image(&image_paths[i * batch_size], images);
-		forward(&model, images); // output (nclass,) is stored in model.state.x
-		process_output(&correct_count, model.state.x, labels, preds,
-			       nclasses, is_test);
+	float total_correct_count = 0.0;
+	// allocate memories based on the number of threads
+	int max_threads = omp_get_max_threads();
+	int nthreads = max_threads < niter ? max_threads : niter;
+	float *images =
+	    malloc(nthreads * batch_size * IMAGE_SZ * sizeof(float));
+	int *labels = malloc(nthreads * batch_size * sizeof(int));
+	int *preds = calloc(nthreads * batch_size, sizeof(int));
+	// build RunState required for storing intermediate results
+	Runstate state[nthreads];
+	#pragma omp parallel for
+	for (int i = 0; i < nthreads; i++) {
+		malloc_run_state(&state[i]);
 	}
-	// process the remaining images
-	batch_size = nimages % batch_size;
-	if (batch_size != 0) {
-		get_labels(labels, &image_paths[niter * batch_size]);
-		read_imagenette_image(&image_paths[niter * batch_size], images);
-		forward(&model, images);
-		process_output(&correct_count, model.state.x, labels, preds,
-			       nclasses, is_test);
+	#pragma omp parallel
+	{
+		// define thread specific variables
+		int correct_count = 0;
+		int thread = omp_get_thread_num();
+		float *thread_images = &images[thread * batch_size * IMAGE_SZ];
+		int *thread_labels = &labels[thread * batch_size];
+		int *thread_preds = &preds[thread * batch_size];
+
+		#pragma omp for nowait
+		for (int i = 0; i < niter; i++) {
+			// define batch size for this iteration to handle the last batch
+			int bs_iter = batch_size;
+			if (i == niter -1 && nimages % batch_size != 0) {
+				bs_iter = nimages % batch_size;
+			}
+			get_labels(thread_labels, &image_paths[i * batch_size],
+				   bs_iter);
+			read_imagenette_image(&image_paths[i * batch_size],
+					      thread_images, bs_iter);
+			forward(&model, &state[thread], thread_images);
+			// output (nclass,) is stored in model.state.x
+			process_output(&correct_count, state[thread].x,
+				       thread_labels, thread_preds, nclasses,
+				       is_test, bs_iter);
+		}
+		#pragma omp critical
+		{
+			total_correct_count += correct_count;
+		}
 	}
 
 	if (!is_test) {
-		printf("%f\n", 100 * correct_count / nimages);
+		printf("%f\n", 100.0f * (float) total_correct_count / nimages);
 	}
+	free(labels);
+	free(preds);
 	free(images);
 	free_model(&model);
+	for (int i = 0; i < nthreads; i++) {
+		free_run_state(&state[i]);
+	}
 	return 0;
 }
