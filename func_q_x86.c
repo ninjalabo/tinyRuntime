@@ -5,12 +5,7 @@
 #include "properties.h"
 #include "func_common.h"
 
-// TODO: add vectorization support for 128
-// TODO: loop unrolling
-
-// TODO: check if changing sign in ax and sy is unnecessary
-// maybe it accelerate computations
-static inline __m256 mul_sum_i32x8_f8x32(__m256i x, __m256i y) {
+static inline __m256i mul_sum_i32x8_i8x32(__m256i x, __m256i y) {
 	// get absolute values of x vectors
 	__m256i ax = _mm256_sign_epi8(x, x);
 	// sign the values of the y vectors
@@ -20,8 +15,8 @@ static inline __m256 mul_sum_i32x8_f8x32(__m256i x, __m256i y) {
 	// sum pairwise, 16x16 -> 8x32
 	__m256i ones = _mm256_set1_epi16(1);
 	__m256i summed_pairs = _mm256_madd_epi16(ones, dot);
-	// convert int to float
-	return _mm256_cvtepi32_ps(summed_pairs);
+
+	return summed_pairs;
 }
 
 static inline float sum_i8x32_f32(__m256 x) {
@@ -34,6 +29,7 @@ static inline float sum_i8x32_f32(__m256 x) {
 }
 
 // TODO: investigate why "vec_dot" here and in "funq_q.c" return slightly diffrent result
+// TODO: pad values to multiple of 32 to reduce loop overhead
 static float vec_dot(int8_t *q, float *sq, int8_t *w, float *sw, int size,
 		     int gs)
 {
@@ -41,25 +37,40 @@ static float vec_dot(int8_t *q, float *sq, int8_t *w, float *sw, int size,
 	float val = 0.0f;
 	for (int group = 0; group < ngroups; group++) {
 		int start_idx = group * gs;
-		__m256 ival8 = _mm256_setzero_ps();
 		// vectorize product of scaling factors to 8x32 float
 		__m256 coef = _mm256_set1_ps(sq[group] * sw[group]);
-		for (int k = 0; k < gs - 31; k += 32) {
+		__m256i sum = _mm256_setzero_si256();
+		// multiply and sum in groups of 32
+		for (int k = 0; k < gs / 32; k++) {
 			// load 32 8 bits int, multiply and sum
-			__m256i w32 =
+			__m256i wv =
 			    _mm256_loadu_si256((const __m256i *)
-					       &w[start_idx + k]);
-			__m256i q32 =
+					       &w[start_idx]);
+			__m256i qv =
 			    _mm256_loadu_si256((const __m256i *)
-					       &q[start_idx + k]);
-			__m256 wq32 = mul_sum_i32x8_f8x32(w32, q32);
-			// multiply by scaling factor and add result
-			ival8 = _mm256_fmadd_ps(coef, wq32, ival8);
+					       &q[start_idx]);
+			sum =
+			    _mm256_add_epi32(sum, mul_sum_i32x8_i8x32(wv, qv));
+			start_idx += 32;
 		}
+		// process remaining elements in groups of 16
+		if ((gs % 32) / 16 > 0) {
+			__m256i wv =
+			    _mm256_zextsi128_si256(_mm_loadu_si128((const
+						   __m128i *) &w[start_idx]));
+			__m256i qv =
+			    _mm256_zextsi128_si256(_mm_loadu_si128((const
+						   __m128i *) &q[start_idx]));
+			sum =
+			    _mm256_add_epi32(sum, mul_sum_i32x8_i8x32(wv, qv));
+			start_idx += 16;
+		}
+		// multiply sum by scaling factor and add to result
+		__m256 ival8 = _mm256_mul_ps(coef, _mm256_cvtepi32_ps(sum));
 		val += sum_i8x32_f32(ival8);
 		// process remaining elements
 		int32_t ival = 0;
-		for (int k = gs - (gs % 32); k < gs; k++) {
+		for (int k = 0; k < gs % 16; k++) {
 			ival +=
 			    ((int32_t) q[start_idx + k]) *
 			    ((int32_t) w[start_idx + k]);
@@ -70,7 +81,6 @@ static float vec_dot(int8_t *q, float *sq, int8_t *w, float *sw, int size,
 	return val;
 }
 
-#include <stdio.h>
 void linear_q_add_bias(float *xout, int8_t *b, float *sb, int nrows, int gs) {
 	int ngroups = nrows / gs;
 	for (int group = 0; group < ngroups; group++) {

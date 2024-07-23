@@ -1,35 +1,96 @@
 #include <math.h>
 #include <arm_neon.h>
+// Doc: https://arm-software.github.io/acle/neon_intrinsics/advsimd.html
 
 #include "properties.h"
 #include "func_common.h"
 
-inline static int32_t vmul(int8x16_t x, int8x16_t y) {
+inline static int32x4_t mul_sum_i8x16_i32x4(int8x16_t x, int8x16_t y) {
+	// multiply lower 8 numbers elementwise
         int16x8_t p0 = vmull_s8(vget_low_s8(x), vget_low_s8(y));
+	// multiply higher 8 numbers elementwise
         int16x8_t p1 = vmull_s8(vget_high_s8(x), vget_high_s8(y));
-
-        return vaddvq_s32(vaddq_s32(vpaddlq_s16(p0), vpaddlq_s16(p1)));
+	// sum until 4 32 bit integers
+        return vaddq_s32(vpaddlq_s16(p0), vpaddlq_s16(p1));
 }
 
-// TODO: loop unrolling
-// TODO: compare speed vs. ggml
-// TODO: optimize more, e.g., vectorize bias addition
+static void vec_dot_64(int32x4_t *sum0, int32x4_t *sum1, int8_t *q, int8_t *w)
+{
+	// vectorize w to 4 16x8 bits vectors
+	int8x16_t w0 = vld1q_s8(w);
+	int8x16_t w1 = vld1q_s8(w + 16);
+	int8x16_t w2 = vld1q_s8(w + 32);
+	int8x16_t w3 = vld1q_s8(w + 48);
+	// vectorize q to 4 16x8 bits vectors
+	int8x16_t q0 = vld1q_s8(q);
+	int8x16_t q1 = vld1q_s8(q + 16);
+	int8x16_t q2 = vld1q_s8(q + 32);
+	int8x16_t q3 = vld1q_s8(q + 48);
+	// multiply elementwise and sum
+	int32x4_t ival0 =
+	    vaddq_s32(mul_sum_i8x16_i32x4(w0, q0), mul_sum_i8x16_i32x4(w1, q1));
+	int32x4_t ival1 =
+	    vaddq_s32(mul_sum_i8x16_i32x4(w2, q2), mul_sum_i8x16_i32x4(w3, q3));
+	*sum0 = vaddq_s32(*sum0, ival0);
+	*sum1 = vaddq_s32(*sum1, ival1);
+}
+
+static inline int32_t vec_dot_32(int8_t *q, int8_t *w)
+{
+	// vectorize w to 2 16x8 bits vectors
+	int8x16_t w0 = vld1q_s8(w);
+	int8x16_t w1 = vld1q_s8(w + 16);
+	// vectorize q to 2 16x8 bits vectors
+	int8x16_t q0 = vld1q_s8(q);
+	int8x16_t q1 = vld1q_s8(q + 16);
+	// multiply elementwise and sum
+	int32x4_t sum0 = mul_sum_i8x16_i32x4(w0, q0);
+	int32x4_t sum1 = mul_sum_i8x16_i32x4(w1, q1);
+	int32_t ival = vaddvq_s32(vaddq_s32(sum0, sum1));
+
+	return ival;
+}
+
+static inline int32_t vec_dot_16(int8_t *q, int8_t *w)
+{
+	// vectorize
+	int8x16_t wv = vld1q_s8(w);
+	int8x16_t xv = vld1q_s8(q);
+	// multiply elementwise and sum
+	int32_t ival = vaddvq_s32(mul_sum_i8x16_i32x4(wv, xv));
+
+	return ival;
+}
+
+// TODO: possible use padding to reduce loop overhead instead of checking for remaining elements
 // TODO: add test in workflow
 static float vec_dot(int8_t *q, float *sq, int8_t *w, float *sw, int size,
 		     int gs) 
 {
-        int ngroups = size / gs;
+	int ngroups = size / gs;
         float val = 0.0f;
         for (int group = 0; group < ngroups; group++) {
 		int start_idx = group * gs;
 		int32_t ival = 0;
-		for (int k = 0; k < gs - 15; k += 16) {
-			int8x16_t wv = vld1q_s8(&w[start_idx + k]);
-			int8x16_t xv = vld1q_s8(&q[start_idx + k]);
-			ival += vmul(wv, xv);
+		// multiply and sum in groups of 64
+		int32x4_t sum0 = vdupq_n_f32(0.0f);
+		int32x4_t sum1 = vdupq_n_f32(0.0f);
+		for (int k = 0; k < gs / 64; k++) {
+			vec_dot_64(&sum0, &sum1, &q[start_idx],
+				   &w[start_idx]);
+			start_idx += 64;
 		}
-		// process remaining elements
-                for (int k = gs - (gs % 16); k < gs; k++) {
+		ival += vaddvq_s32(vaddq_s32(sum0, sum1));
+		// process remaining elements in groups of 32, 16 and 1
+		if ((gs % 64) / 32 > 0) {
+			ival += vec_dot_32(&q[start_idx], &w[start_idx]);
+			start_idx += 32;
+		}
+		if ((gs % 32) / 16 > 0) {
+			ival += vec_dot_16(&q[start_idx], &w[start_idx]);
+			start_idx += 16;
+		}
+		for (int k = 0; k < gs % 16; k++) {
                         ival +=
                             ((int32_t) q[start_idx + k]) *
                             ((int32_t) w[start_idx + k]);
