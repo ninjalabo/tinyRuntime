@@ -39,6 +39,11 @@ compile:
 	$(CC) $(CFLAGS) run.c $(SRC) -o run $(LDFLAGS)
 	$(CC) $(CFLAGS) runq.c $(SRC) -o runq $(LDFLAGS)
 
+# FIX: remove after unified runq_static.c and runq.c
+# for OneDNN use -I/opt/homebrew/include -L/opt/homebrew/lib -ldnnl
+compile_static:
+	$(CC) -Os -Wall runq_static.c func_common.c func.c func_sq.c -o runq $(LDFLAGS)
+
 clean:
 	rm -f run runq
 
