@@ -3,8 +3,18 @@ name: compiler-test
 
 on:
   push:
+    paths:
+      - 'prep_model.py'
+      - 'export_model.py'
+      - 'Dockerfile'
+      - '.github/workflows/compiler-test.yml'
   pull_request:
     types: [opened, synchronize, reopened]
+    paths:
+      - 'prep_model.py'
+      - 'export_model.py'
+      - 'Dockerfile'
+      - '.github/workflows/compiler-test.yml'
   workflow_dispatch:
 
 jobs:
