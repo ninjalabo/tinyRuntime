@@ -6,6 +6,7 @@ import time
 import psutil
 import struct
 import numpy as np
+import pandas as pd
 import torch
 import csv
 from datetime import datetime
@@ -15,6 +16,7 @@ from export import export_model, export_modelq8
 from train import load
 
 def run_c(dir_path, base_command, model_path):
+    '''Run C inference and return dictionary with accuracy, duration, model size, and memory usage.'''
     # get file paths of images and their labels
     files = []
     for label in range(10):
@@ -42,11 +44,13 @@ def run_c(dir_path, base_command, model_path):
     acc = float(output.decode().strip())
     dur = end_time - start_time
     model_size = os.path.getsize(model_path) / (1024 * 1024)
+    d = {"Accuracy": acc, "Time": dur, "Model size": model_size, "Memory usage": mems}
 
-    return acc, dur, model_size, mems
+    return d
 
 
 def run_python(dir_path, model_path):
+    '''Run Python inference and return dictionary with accuracy, duration, model size, and memory usage.'''
     command = ["python", "run.py", model_path, dir_path]
     mems = []
 
@@ -66,14 +70,24 @@ def run_python(dir_path, model_path):
     acc = float(output.decode().strip())
     dur = end_time - start_time
     model_size = os.path.getsize(model_path) / (1024 * 1024)
+    d = {"Accuracy": acc, "Time": dur, "Model size": model_size, "Memory usage": mems}
 
-    return acc, dur, model_size, mems
+    return d
 
 # Generate model files for tinyRuntime
 path = "data"
 model = load("resnet18").model
 export_model(model, "model.bin")
 export_modelq8(model, "model-q8.bin")
+
+def compare_results(res, architecture, runtime, quantized):
+    '''Compare the results and fail if performance is worse compared to the previous result'''
+    df = pd.read_csv("benchmark.csv")
+    df = df[(df["Architecture"] == architecture) & (df["Runtime"] == runtime) & (df["Quantization"] == quantized)]
+    if res["Accuracy"] < 0.9 * df["Accuracy"].values[-1]:
+        raise ValueError(f"{runtime} - {quantized}: Accuracy is worse than 10%")
+    if res["Time"] > 1.25 * df["Time"].values[-1]:
+        raise ValueError("{runtime} - {quantized}: Time is worse than 25%.")
 
 def save_benchmark_csv():
     # Get results
@@ -83,11 +97,15 @@ def save_benchmark_csv():
     res0 = run_python(path, "model.pkl")
     res1 = run_c(path, "./run", "model.bin")
     res2 = run_c(path, "./runq", "model-q8.bin")
+    # raise error if performance is worse than earlier
+    compare_results(res0, architecture, "PyTorch", False)
+    compare_results(res1, architecture, "tinyRuntime", False)
+    compare_results(res2, architecture, "tinyRuntime", True)
 
     def generate_dict(res, runtime, quantization=False):
         d = {"Commit": commit_id, "Datetime": time, "Architecture": architecture, "Runtime": runtime,
-             "Quantization": quantization, "Accuracy": res[0], "Time": res[1], "Model size": res[2],
-             "Max memory": np.max(res[3])}
+             "Quantization": quantization, "Accuracy": res["Accuracy"], "Time": res["Time"],
+             "Model size": res["Model size"], "Max memory": np.max(res["Memory usage"])}
         return d
 
     data = [generate_dict(res0, "PyTorch"), generate_dict(res1, "tinyRuntime"),
@@ -95,14 +113,12 @@ def save_benchmark_csv():
 
     # Write results
     csv_file = "benchmark.csv"
-    with open(csv_file, 'a', newline='') as f:
+    with open(csv_file, 'w', newline='') as f:
         writer = csv.DictWriter(f, fieldnames=data[0].keys())
-        # If the file is empty, write header
-        if f.tell() == 0:
-            writer.writeheader()
+        writer.writeheader()
         for row in data:
             writer.writerow(row)
 
-    print(f'Data has been appended to {csv_file}.')
+    print(f'Data has been written to {csv_file}.')
 
 save_benchmark_csv()
