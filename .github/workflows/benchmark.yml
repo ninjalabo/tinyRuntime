@@ -44,9 +44,9 @@ jobs:
 
       - name: Download benchmark.csv
         run: |
-          wget https://raw.githubusercontent.com/ninjalabo/ninjalabo.github.io/main/benchmark.csv || true
+          wget https://raw.githubusercontent.com/ninjalabo/ninjalabo.github.io/main/benchmark.csv
 
-      - name: Run benchmark # Update benchmark.csv by appending new results
+      - name: Run benchmark # Save results to benchmark.csv
         run: |
           python benchmark.py
 
@@ -82,6 +82,10 @@ jobs:
           pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
           pip install toml psutil huggingface_hub fastai fasterai
 
+      - name: Download benchmark.csv
+        run: |
+          wget https://raw.githubusercontent.com/ninjalabo/ninjalabo.github.io/main/benchmark.csv
+
       - name: Run benchmark # Save results to benchmark.csv
         run: |
           python benchmark.py
@@ -99,7 +103,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Download benchmark.csv from benchmark-linux that contains new x86 results and all previous results
+      # Download benchmark.csv from benchmark-linux that contains new x86 results
       - name: Download benchmark-x86
         uses: actions/download-artifact@v4
         with:
@@ -113,10 +117,14 @@ jobs:
           name: benchmark-arm
           path: arm
 
+      - name: Download benchmark.csv
+        run: |
+          wget https://raw.githubusercontent.com/ninjalabo/ninjalabo.github.io/main/benchmark.csv
+
       - name: Combine benchmark results
         run: |
-           cat arm/benchmark.csv | tail -n +2 >> x86/benchmark.csv
-           mv x86/benchmark.csv benchmark.csv
+          cat arm/benchmark.csv | tail -n +2 >> x86/benchmark.csv
+          cat x86/benchmark.csv | tail -n +2 >> benchmark.csv
 
       - name: Pushes the output file to another repository
         uses: dmnemec/copy_file_to_another_repo_action@main
