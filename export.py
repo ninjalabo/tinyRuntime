@@ -222,6 +222,22 @@ def export_modelq8(model, file_path="modelq8.bin", gs=64):
     f.close()
     print(f"wrote {file_path}")
 
+class Quantizer():
+    def __init__(self):
+        architecture = platform.machine().lower()
+        backend = "qnnpack" if 'arm' in architecture or 'aarch64' in architecture else "x86"
+        self.qconfig = get_default_qconfig_mapping(backend)
+        torch.backends.quantized.engine = backend
+
+    def quantize(self, model, calibration_dls):
+        x, _ = calibration_dls.valid.one_batch()
+        model_prepared = prepare_fx(model.eval(), self.qconfig, x)
+        _ = [model_prepared(xb.to('cpu')) for xb, _ in calibration_dls.valid]
+
+        return model_prepared, convert_fx(model_prepared)
+
+# FIX: find the reason ResNet50 fails.
+
 def find_input_activation_indices(module, layers, index=0, indices=[]):
     '''
     Find indices for input activations of given layers in the module.
@@ -323,7 +339,7 @@ def export_modelq8_static(model, model_prepared, file_path="modelq8.bin"):
         f.write(struct.pack("fi", scaling_factor, zero_point))
 
     # write layers' quantized weights and biases
-    _, activation_indices = find_input_activation_indices(model1, ["Conv2d", "ConvReLU2d", "Linear", "LinearReLU"])
+    _, activation_indices = find_input_activation_indices(model_prepared, ["Conv2d", "ConvReLU2d", "Linear", "LinearReLU"])
     for i, l in enumerate([*conv_layers, *linear_layers]):
         serialize_int8(f, l.weight().int_repr()) # save the tensor in int8
         if l.bias:
