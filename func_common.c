@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <stdbool.h>
 
 #include "properties.h"
 
@@ -223,24 +224,29 @@ static float pool_get_pixel(float *x, int height, int width, int ksize,
 
 static void pool_generic(float *xout, float *x, int *height, int *width,
 			 int nchannels, int ksize, int stride, int pad,
-			 PoolOperation op)
+			 PoolOperation op, bool concat)
 {
 	int out_height = (*height + 2 * pad - ksize) / stride + 1;
 	int out_width = (*width + 2 * pad - ksize) / stride + 1;
 	int out_size = out_height * out_width;
 
-	for (int group = 0; group < batch_size * nchannels; group++) {
-		for (int pixel = 0; pixel < out_size; pixel++) {
-			int out_row = pixel / out_width;
-			int out_col = pixel % out_width;
-			int in_start_row = out_row * stride - pad;
-			int in_start_col = out_col * stride - pad;
+	for (int k = 0; k < batch_size; k++) {
+		int xout_idx = k * nchannels * out_size;
+		xout_idx = concat ? 2 * xout_idx : xout_idx;
+		for (int c = 0; c < nchannels; c++) {
+			int group = k * nchannels + c;
+			for (int pixel = 0; pixel < out_size; pixel++) {
+				int out_row = pixel / out_width;
+				int out_col = pixel % out_width;
+				int in_start_row = out_row * stride - pad;
+				int in_start_col = out_col * stride - pad;
 
-			float val =
-			    pool_get_pixel(x, *height, *width, ksize,
-					   in_start_row, in_start_col, op,
-					   group);
-			xout[group * out_size + pixel] = val;
+				float val =
+				pool_get_pixel(x, *height, *width, ksize,
+						in_start_row, in_start_col, op,
+						group);
+				xout[xout_idx + c * out_size + pixel] = val;
+			}
 		}
 	}
 	*height = out_height;
@@ -251,16 +257,35 @@ void maxpool(float *xout, float *x, int *height, int *width, int nchannels,
 	     int ksize, int stride, int pad)
 {
 	pool_generic(xout, x, height, width, nchannels, ksize, stride, pad,
-		     pool_get_max);
+		     pool_get_max, false);
 }
 
 void avgpool(float *xout, float *x, int *height, int *width, int nchannels,
 	     int ksize, int stride, int pad)
 {
 	pool_generic(xout, x, height, width, nchannels, ksize, stride, pad,
-		     pool_add);
+		     pool_add, false);
 	for (int i = 0; i < batch_size * nchannels * (*height) * (*width); i++)
 		xout[i] /= (ksize * ksize);
+}
+
+void concat_pool(float *xout, float *x, int *height, int *width, int nchannels,
+		 int ksize, int stride, int pad)
+{
+	// maxpool first half of the output and avgpool the second half
+	int h_prev = *height;
+	int w_prev = *width;
+	pool_generic(xout, x, height, width, nchannels, ksize, stride, pad,
+		     pool_get_max, true);
+	int half_out_size = nchannels * (*height) * (*width);
+	pool_generic(&xout[half_out_size], x, &h_prev, &w_prev, nchannels,
+		     ksize, stride, pad, pool_add, true);
+	for (int k = 0; k < batch_size; k++) {
+		int xout_idx = k * 2 * half_out_size + half_out_size;
+		for (int i = 0; i < half_out_size; i++) {
+			xout[xout_idx + i] /= (ksize * ksize);
+		}
+	}
 }
 
 // FIX : Unify pool functions

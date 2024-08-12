@@ -237,6 +237,21 @@ TEST(TestGroup, Pool)
         }
 }
 
+TEST(TestGroup, ConcatPool)
+{
+        int nch = 1, h = 2, w = 2;
+        int ksize = 2, stride = 2, pad = 0;
+	int out_h = 1, out_w = 1;
+
+        float x[] = { 1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f };
+	float xout[2 * batch_size * out_h * out_w];
+        concat_pool(xout, x, &h, &w, nch, ksize, stride, pad);
+        float ref[] = { 4.0f, 2.5f, 8.0f, 6.5f};
+        for (int i = 0; i < 2 * batch_size * h * w; i++) {
+            DOUBLES_EQUAL(ref[i], xout[i], TOL);
+        }
+}
+
 TEST(TestGroup, Matadd)
 {
         float x[] = { 1.0f, 2.0f, 3.0f, 4.0f };

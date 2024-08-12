@@ -20,6 +20,9 @@ extern void batchnorm(float *xout, float *x, float *p, BnConfig bc, int size);
 extern void maxpool(float *xout, float *x, int *height, int *width,
 		    int nchannels, int ksize, int stride, int pad);
 
+extern void concat_pool(float *xout, float *x, int *height, int *width,
+			int nchannels, int ksize, int stride, int pad);
+
 extern void avgpool(float *xout, float *x, int *height, int *width,
 		    int nchannels, int ksize, int stride, int pad);
 

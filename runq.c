@@ -276,11 +276,7 @@ static void basic_block(QuantizedTensor *xq, float *x, float *x2, float *x3,
 		  int8_t *p, float *sf, ConvConfigQ *cc, LinearConfigQ *lc,
 		  BnConfig *bc, int h, int w, int i)
 {
-	int h_prev = h;
-	int w_prev = w;
-	maxpool(x2, x, &h, &w, cc[i - 1].oc, h, 1, 0);
-	avgpool(x2 + cc[i - 1].oc, x, &h_prev, &w_prev, cc[i - 1].oc, h_prev,
-		1, 0);
+	concat_pool(x2, x, &h, &w, cc[i - 1].oc, h, 1, 0);
 	batchnorm(x, x2, sf, bc[i], 1);
 	quantize(xq, x, lc[0].in, lc[0].gs_weight);
 	linear_q(x2, xq, p, sf, lc[0]);
