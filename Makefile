@@ -39,10 +39,12 @@ compile:
 	$(CC) $(CFLAGS) run.c $(SRC) -o run $(LDFLAGS)
 	$(CC) $(CFLAGS) runq.c $(SRC) -o runq $(LDFLAGS)
 
+ONEDNN_HOME := $(if $(filter clang,$(CC)),$(shell brew --prefix onednn),)
+ONEDNN_FLAGS += -ldnnl
+ONEDNN_FLAGS += $(if $(ONEDNN_HOME),-I$(ONEDNN_HOME)/include -L$(ONEDNN_HOME)/lib,)
 # FIX: remove after unified runq_static.c and runq.c
-# for OneDNN use -I/opt/homebrew/include -L/opt/homebrew/lib -ldnnl
 compile_static:
-	$(CC) -Os -Wall runq_static.c func_common.c func.c func_sq.c -o runq $(LDFLAGS)
+	$(CC) $(CFLAGS) runq_static.c func_common.c func.c func_sq_onednn.c -o runq $(LDFLAGS) $(ONEDNN_FLAGS)
 
 clean:
 	rm -f run runq
