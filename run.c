@@ -107,9 +107,10 @@ static void free_model(Model * m)
 // sanity check function for writing tensors, e.g., it can be used to evaluate values after a specific layer.
 static void write_tensor(float *x, int size)
 {
-	FILE *f = fopen("test1.txt", "w");
-	for (int i = 0; i < size; i++)
-		fprintf(f, "%f\n", x[i]);
+	FILE *f = fopen("test.txt", "wb");
+	// for (int i = 0; i < size; i++)
+	// 	fprintf(f, "%f\n", x[i]);
+	fwrite(x, sizeof(float), size, f);
 	fclose(f);
 }
 #endif
@@ -214,11 +215,7 @@ static void basic_block(float *x, float *x2, float *x3, float *p,
  static void tail(float *x, float *x2, float *x3, float *p, ConvConfig *cc,
 		  LinearConfig *lc, BnConfig *bc, int h, int w, int i)
 {
-	int h_prev = h;
-	int w_prev = w;
-	maxpool(x2, x, &h, &w, cc[i - 1].oc, h, 1, 0); // by expecting h = w
-	avgpool(x2 + cc[i - 1].oc, x, &h_prev, &w_prev, cc[i - 1].oc, h_prev,
-		1, 0);
+	concat_pool(x2, x, &h, &w, cc[i - 1].oc, h, 1, 0);
 	batchnorm(x, x2, p, bc[0], 1);
 	linear(x2, x, p, lc[0]);
 	relu(x2, lc[0].out);

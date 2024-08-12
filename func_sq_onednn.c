@@ -9,15 +9,13 @@
 
 // FIX: unify with func_q.c
 // FIX: Allocating memory is not necessary if function receives a pointer
-// FIX: matmul by considering batch size
 // FIX: optimize transpose
-// FIX: modify functions apply to batch size
 void quantize(UQuantizedTensorSQ * qx, float *x, float scale, int zero_point,
 	      int size)
 {
 	qx->scale = scale;
 	qx->zero_point = zero_point;
-	for (int i = 0; i < size; i++) {
+	for (int i = 0; i < batch_size * size; i++) {
 		int16_t quant_value = (int16_t) roundf(x[i] / qx->scale);
 		int16_t quantized = quant_value + qx->zero_point;
 		if (quantized > 255) {
@@ -31,7 +29,7 @@ void quantize(UQuantizedTensorSQ * qx, float *x, float scale, int zero_point,
 
 void dequantize(float *x, UQuantizedTensorSQ * qx, int size)
 {
-	for (int i = 0; i < size; i++) {
+	for (int i = 0; i < batch_size * size; i++) {
 		x[i] = (qx->q[i] - qx->zero_point) * qx->scale;
 	}
 }
@@ -40,7 +38,6 @@ static inline uint8_t dequantize_quantize(int32_t val, float scale_coef,
 					  int zero_point)
 {
 	int16_t quantized = (int16_t) roundf(scale_coef * val) + zero_point;
-	// TODO: check if this is necessary
 	if (quantized > 255) {
 		quantized = 255;
 	} else if (quantized < 0) {
@@ -64,14 +61,19 @@ void linear_q(UQuantizedTensorSQ *xout, UQuantizedTensorSQ * x, int8_t * p,
 	else {
 		b = calloc(nrows, sizeof(int32_t));
 	}
-	// calculate matmul
-	dnnl_gemm_u8s8s32('N', 'T', 'R', 1, nrows, ncols, 1.0f, x->q,
-				ncols, x->zero_point, w, ncols,
-				lc.zero_point, 1.0f, C, nrows, b);
-	// dequantize and quantize
-	float scale_coef = lc.scale * x->scale / lc.out_scale;
-	for (int i = 0; i < nrows; i++) {
-		xout->q[i] = dequantize_quantize(C[i], scale_coef, lc.out_zero_point);
+	for (int k = 0; k < batch_size; k++) {
+		// calculate matmul
+		dnnl_gemm_u8s8s32('N', 'T', 'R', 1, nrows, ncols, 1.0f,
+				  &x->q[k * ncols], ncols, x->zero_point, w,
+				  ncols, lc.zero_point, 1.0f, &C[k * nrows],
+				  nrows, b);
+		// dequantize and quantize
+		float scale_coef = lc.scale * x->scale / lc.out_scale;
+		for (int i = 0; i < nrows; i++) {
+			xout->q[k * nrows + i] =
+			    dequantize_quantize(C[k * nrows + i], scale_coef,
+						lc.out_zero_point);
+		}
 	}
 	free(C);
 	xout->scale = lc.out_scale;
@@ -87,6 +89,7 @@ void conv_q(UQuantizedTensorSQ *xout, UQuantizedTensorSQ * x, int8_t * p,
 	int nrows = cc.ic * cc.ksize * cc.ksize;
 
 	int32_t *C = calloc(batch_size * nchannels * ncols, sizeof(int32_t));
+	int32_t *Ct = malloc(batch_size * nchannels * ncols * sizeof(int32_t));
 	int8_t *w = p + cc.qoffset;
 	int32_t *b;
 	if (cc.has_bias)
@@ -94,19 +97,27 @@ void conv_q(UQuantizedTensorSQ *xout, UQuantizedTensorSQ * x, int8_t * p,
 	else {
 		b = calloc(nchannels, sizeof(int32_t));
 	}
-	// FIXME iterate over batch size or calc directly
-	dnnl_gemm_u8s8s32('N', 'T', 'R', ncols, nchannels, nrows, 1.0f, x->q, nrows, x->zero_point, w, nrows, cc.zero_point, 1.0f, C, nchannels, b);
-	// transpose
-	int32_t *Ct = malloc(nchannels * ncols * sizeof(int32_t));
-	for (int c = 0; c < nchannels; c++) {
-		for (int i = 0; i < ncols; i++) {
-			Ct[c * ncols + i] = C[i * nchannels + c];
+	for (int k = 0; k < batch_size; k++) {
+		int C_idx = k * nchannels * ncols;
+		// calculate matmul
+		dnnl_gemm_u8s8s32('N', 'T', 'R', ncols, nchannels, nrows, 1.0f,
+				  &x->q[k * ncols * nrows], nrows,
+				  x->zero_point, w, nrows, cc.zero_point, 1.0f,
+				  &C[C_idx], nchannels, b);
+		// transpose
+		for (int c = 0; c < nchannels; c++) {
+			for (int i = 0; i < ncols; i++) {
+				Ct[C_idx + c * ncols + i] =
+				    C[C_idx + i * nchannels + c];
+			}
 		}
-	}
-	// dequantize
-	float scale_coef = cc.scale * x->scale / cc.out_scale;
-	for (int i = 0; i < nchannels * ncols; i++) {
-		xout->q[i] = dequantize_quantize(Ct[i], scale_coef, cc.out_zero_point);
+		// dequantize
+		float scale_coef = cc.scale * x->scale / cc.out_scale;
+		for (int i = 0; i < nchannels * ncols; i++) {
+			xout->q[k * nchannels * ncols + i] =
+			    dequantize_quantize(Ct[C_idx + i], scale_coef,
+						cc.out_zero_point);
+		}
 	}
 	free(C);
 	free(Ct);

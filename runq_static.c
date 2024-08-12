@@ -266,14 +266,9 @@ static void tail(UQuantizedTensorSQ *xq, UQuantizedTensorSQ *xq2,
 		 LinearConfigSQ *lc, BnConfig *bc, ActivationConfigSQ *ac,
 		 int h, int w, int i, int ia)
 {
-	int h_prev = h;
-	int w_prev = w;
-
 	// FIX: is dequantize needed here?
 	dequantize(x, xq2, cc[i - 1].oc * h * w);
-	maxpool(x2, x, &h, &w, cc[i - 1].oc, h, 1, 0);
-	avgpool(x2 + cc[i - 1].oc, x, &h_prev, &w_prev, cc[i - 1].oc, h_prev,
-		1, 0);
+	concat_pool(x2, x, &h, &w, cc[i - 1].oc, h, 1, 0);
 	quantize(xq, x2, ac[ia].scale, ac[ia].zero_point, lc[0].in);
 	dequantize(x2, xq, lc[0].in);
 	quantize(xq, x2, ac[ia + 3].scale, ac[ia + 3].zero_point, lc[0].in);

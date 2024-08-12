@@ -9,10 +9,9 @@ void quantize(UQuantizedTensorSQ * qx, float *x, float scale, int zero_point,
 {
 	qx->scale = scale;
 	qx->zero_point = zero_point;
-	for (int i = 0; i < size; i++) {
+	for (int i = 0; i < batch_size * size; i++) {
 		int16_t quant_value = (int16_t) roundf(x[i] / qx->scale);
 		int16_t quantized = quant_value + qx->zero_point;
-		// TODO: check if this is necessary
 		if (quantized > 255) {
 			quantized = 255;
 		} else if (quantized < 0) {
@@ -24,7 +23,7 @@ void quantize(UQuantizedTensorSQ * qx, float *x, float scale, int zero_point,
 
 void dequantize(float *x, UQuantizedTensorSQ * qx, int size)
 {
-	for (int i = 0; i < size; i++) {
+	for (int i = 0; i < batch_size * size; i++) {
 		x[i] = (qx->q[i] - qx->zero_point) * qx->scale;
 	}
 }
@@ -87,7 +86,7 @@ void conv_q(UQuantizedTensorSQ *xout, UQuantizedTensorSQ * x, int8_t * p,
 	int nrows = cc.ic * cc.ksize * cc.ksize;
 
 	int8_t *w = p + cc.qoffset;
-	int32_t *b = (int32_t*) (w + nchannels * nrows);
+	int32_t *b = (int32_t*) (w +  nchannels * nrows);
 	float scale_coef = cc.scale * x->scale / cc.out_scale;
 	for (int bs = 0; bs < batch_size; bs++) {
 		int x_idx = bs * nrows * ncols;

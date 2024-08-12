@@ -232,11 +232,10 @@ class Quantizer():
     def quantize(self, model, calibration_dls):
         x, _ = calibration_dls.valid.one_batch()
         model_prepared = prepare_fx(model.eval(), self.qconfig, x)
-        _ = [model_prepared(xb.to('cpu')) for xb, _ in calibration_dls.valid]
+        with torch.no_grad():
+            _ = [model_prepared(xb.to('cpu')) for xb, _ in calibration_dls.valid]
 
         return model_prepared, convert_fx(model_prepared)
-
-# FIX: find the reason ResNet50 fails.
 
 def find_input_activation_indices(module, layers, index=0, indices=[]):
     '''
