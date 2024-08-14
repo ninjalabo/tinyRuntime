@@ -33,32 +33,6 @@ def serialize_int32(file, tensor):
     b = struct.pack(f'{len(d)}i', *d)
     file.write(b)
 
-def quantize_q80(w, group_size):
-    '''
-    Take a tensor and returns the Q8_0 quantized version
-    i.e. symmetric quantization into int8, range [-127,127]
-    '''
-    assert w.numel() % group_size == 0
-    ori_shape = w.shape
-    w = w.float() # convert to float32
-    w = w.reshape(-1, group_size)
-    # find the max in each group
-    wmax = torch.abs(w).max(dim=1).values
-    # calculate the scaling factor such that float = quant * scale
-    scale = wmax / 127.0
-    # scale into range [-127, 127]
-    quant = w / scale[:,None]
-    # round to nearest integer
-    int8val = torch.round(quant).to(torch.int8)
-    # dequantize by rescaling
-    fp32val = (int8val.float() * scale[:,None]).view(-1)
-    fp32valr = fp32val.reshape(-1, group_size)
-    # calculate the max error in each group
-    err = torch.abs(fp32valr - w).max(dim=1).values
-    # find the max error across all groups
-    maxerr = err.max().item()
-    return int8val, scale, maxerr
-
 def export_model(model, file_path="model.bin"):
     '''
     Export the quantized model to a file
@@ -115,6 +89,64 @@ def export_model(model, file_path="model.bin"):
     f.close()
     print(f"wrote {file_path}")
 
+def quantize_q8_symm(w, group_size):
+    '''
+    Get tensor and quantize it in group sizes.
+    Symmetric quantization into int8, range [-127,127]
+    '''
+    assert w.numel() % group_size == 0
+    ori_shape = w.shape
+    w = w.float() # convert to float32
+    w = w.reshape(-1, group_size)
+    # find the max in each group
+    wmax = torch.abs(w).max(dim=1).values
+    # calculate the scaling factor such that float = quant * scale
+    scale = wmax / 127.0
+    # scale into range [-127, 127]
+    quant = w / scale[:,None]
+    # round to nearest integer
+    int8val = torch.round(quant).to(torch.int8)
+    # dequantize by rescaling
+    fp32val = (int8val.float() * scale[:,None]).view(-1)
+    fp32valr = fp32val.reshape(-1, group_size)
+    # calculate the max error in each group
+    err = torch.abs(fp32valr - w).max(dim=1).values
+    # find the max error across all groups
+    maxerr = err.max().item()
+    return int8val, scale, maxerr
+
+def quantize_q8_asymm(w, group_size):
+    '''
+    Get tensor and quantize it in group sizes.
+    Asymmetric quantization into int8, range [-128,127]
+    NOTE: accuracy may drop obviuosly if group size is 1
+    '''
+    assert w.numel() % group_size == 0
+    if group_size==1:
+        print("Warning: A group_size of 1 may result in low inference accuracy.")
+    ori_shape = w.shape
+    w = w.float() # convert to float32
+    w = w.reshape(-1, group_size)
+    # find min an max in each group
+    wmax = w.max(dim=1).values
+    wmin = w.min(dim=1).values
+    # calculate the scaling factor and zero point such that float = (quant - zero_point) * scale
+    scale = (wmax - wmin) / 255.0
+    scale[scale == 0] = 1e-4   # handle zero division, don't decrease because precision is limited in inference
+    zero_point = torch.round(-128 - wmin / scale)
+    # scale into range [-128, 127]
+    quant = w / scale[:,None] + zero_point[:,None]
+    # round to nearest integer
+    int8val = torch.clamp(torch.round(quant), -128, 127).to(torch.int8)
+    # dequantize by rescaling
+    fp32val = ((int8val.float() - zero_point[:,None]) * scale[:,None]).view(-1)
+    fp32valr = fp32val.reshape(-1, group_size)
+    # calculate the max error in each group
+    err = torch.abs(fp32valr - w).max(dim=1).values
+    # find the max error across all groups
+    maxerr = err.max().item()
+    return int8val, scale, zero_point, maxerr
+
 def calculate_groupsize(dim, gs):
     '''
     Change the group size if dimension is smaller, and adjust if dim is not a
@@ -128,11 +160,12 @@ def calculate_groupsize(dim, gs):
         factors = list(divisors(dim)) # give the factors of number "dim"
         return min(factors, key=lambda x: abs(x - gs)) # find the closest number to group size
 
-def export_modelq8(model, file_path="modelq8.bin", gs=64):
+def export_modelq8(model, file_path="modelq8.bin", gs=64, asymmetric=True):
     '''
     Export the quantized model to a file
     The data inside the file follows this order:
-    1. The number of: classes, each type of layers and parameters
+    1. The number of: classes, each type of layers and parameters +
+    is quantization symmetric or asymmetric
     2. CNN, FC and BN layers' configuration
     3. CNN and FC layers' quantized parameters
     4. CNN and FC layers' scaling factors
@@ -149,12 +182,13 @@ def export_modelq8(model, file_path="modelq8.bin", gs=64):
     nbn = len(bn_layers)
     nclasses = 10
     nparameters = sum(p.numel() for layer in [*conv_layers, *linear_layers] for p in layer.parameters())
-    header = struct.pack("5i", nclasses, nconv, nlinear, nbn, nparameters)
+    header = struct.pack("6i", nclasses, nconv, nlinear, nbn, nparameters, int(asymmetric))
     f.write(header)
     # write layers' config
     qoffset = 0 # offset for quantized parameters
-    soffset = 0 # offset for scaling factors
+    soffset = 0 # offset for scaling factors (and zero points if asymmetric)
     group_sizes = [] # save group sizes of each layer
+    offset_coef = 2 if asymmetric else 1 # coef for calculating offset
     for l in conv_layers:
         # calculates group sizes for weights and biases
         gs_weight = calculate_groupsize(l.in_channels * l.kernel_size[0]**2, gs)
@@ -169,10 +203,10 @@ def export_modelq8(model, file_path="modelq8.bin", gs=64):
         nweights = l.out_channels * l.in_channels * l.kernel_size[0]**2
         if l.bias is not None:
             qoffset += nweights + l.out_channels
-            soffset += nweights // gs_weight + l.out_channels // gs_bias
+            soffset += offset_coef * (nweights // gs_weight + l.out_channels // gs_bias)
         else:
             qoffset += nweights
-            soffset += nweights // gs_weight
+            soffset += offset_coef * (nweights // gs_weight)
 
     for l in linear_layers:
         gs_weight = calculate_groupsize(l.in_features, gs)
@@ -186,10 +220,10 @@ def export_modelq8(model, file_path="modelq8.bin", gs=64):
         nweights = l.in_features * l.out_features
         if l.bias is not None:
             qoffset += nweights + l.out_features
-            soffset += nweights // gs_weight + l.out_features // gs_bias
+            soffset += offset_coef * (nweights // gs_weight + l.out_features // gs_bias)
         else:
             qoffset += nweights
-            soffset += nweights // gs_weight   
+            soffset += offset_coef * (nweights // gs_weight)
 
     for l in bn_layers:
         f.write(struct.pack("2i", l.num_features, soffset))
@@ -197,20 +231,29 @@ def export_modelq8(model, file_path="modelq8.bin", gs=64):
         soffset += 4 * l.num_features
 
     # write layers' parameters
-    ew = []
-    scaling_factors = []
+    ew = []   # list for errors
+    scales = []   # list for scales
+    zero_points = []  # list for zero points if asymmetric
     i = 0
     for l in [*conv_layers, *linear_layers]:
         for p in l.parameters():
-            q, s, err = quantize_q80(p, group_sizes[i])
+            if asymmetric:
+                q, s, zp, err = quantize_q8_asymm(p, group_sizes[i])
+                zero_points.append(zp)
+            else:
+                q, s, err = quantize_q8_symm(p, group_sizes[i])
+
             serialize_int8(f, q) # save the tensor in int8
-            scaling_factors.append(s)
+            scales.append(s)
             ew.append((err, p.shape))
             i += 1
             print(f"Quantized {tuple(p.shape)} to Q8_0 with max error {err}")
 
-    for s in scaling_factors:
-        serialize_fp32(f, s) # save scale factors
+    # save scales (and zero points if asymmetric)
+    assert len(scales) == len(zero_points) or not asymmetric
+    for i in range(len(scales)):
+        serialize_fp32(f, scales[i])
+        serialize_int32(f, zero_points[i]) if asymmetric else None
 
     for l in bn_layers:
         for p in [l.weight, l.bias, l.running_mean, l.running_var]:

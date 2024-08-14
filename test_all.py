@@ -53,13 +53,17 @@ def test_runfiles(model_size, quantized=True, file_path=file_path):
     assert np.allclose(res, ref, atol=1e-5, rtol=0), "run.c: Probabilities are not close."
 
     if quantized:
-        # run quantized model test with group size = 1 and 2 in test mode
-        export_modelq8(model, file_path="modelq8_1.bin", gs=1)
+        # test quantized model with group size = 1
+        export_modelq8(model, file_path="modelq8_1.bin", gs=1, asymmetric=False)
         resq1 = execute(["./runq", "test", "modelq8_1.bin", file_path])
-        assert np.allclose(resq1, ref, atol=1e-5, rtol=0), "runq.c (group size = 1): Probabilities are not close."
-
-        export_modelq8(model, file_path="modelq8_2.bin", gs=2)
+        assert np.allclose(resq1, ref, atol=1e-5, rtol=0), "runq.c (symmteric, group size = 1): Probabilities are not close."
+        # group size = 1
+        export_modelq8(model, file_path="modelq8_2.bin", gs=2, asymmetric=False)
         resq2 = execute(["./runq", "test", "modelq8_2.bin", file_path])
-        assert np.allclose(resq2, ref, atol=2e-2, rtol=0), "runq.c (group size = 2):Probabilities are not close."
+        assert np.allclose(resq2, ref, atol=2e-2, rtol=0), "runq.c (symmetric, group size = 2):Probabilities are not close."
+        # asymmetric (i.e. using zero point) with group size = 1
+        export_modelq8(model, file_path="modelq8_2.bin", gs=10, asymmetric=True)
+        resq10 = execute(["./runq", "test", "modelq8_2.bin", file_path])
+        assert np.allclose(resq10, ref, atol=1e-1, rtol=0), "runq.c (asymmetric, group size = 2):Probabilities are not close."
 
     print("Done")

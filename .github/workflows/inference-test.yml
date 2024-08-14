@@ -45,10 +45,11 @@ jobs:
           ./ut
           pytest test_all.py
 
+      # FIX: compiled optimized quantized inference once it's ready
       - name: Run optimized implementation
         run: |
-          make ut BLIS=1 ARCH=x86
-          make compile BLIS=1 ARCH=x86
+          make ut BLIS=1
+          make compile BLIS=1
           ./ut
           pytest test_all.py
 
@@ -96,10 +97,11 @@ jobs:
           ./ut
           pytest test_all.py
 
+      # FIX: compiled optimized quantized inference once it's ready
       - name: Run optimized implementation
         run: |
-          make ut BLIS=1 ARCH=arm
-          make compile BLIS=1 ARCH=arm
+          make ut BLIS=1
+          make compile BLIS=1
           ./ut
           pytest test_all.py
 
