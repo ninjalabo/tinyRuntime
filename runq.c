@@ -37,7 +37,7 @@ typedef struct {
 	size_t file_size;	// size of the checkpoint file in bytes
 } Model;
 
-static void malloc_run_state(Runstate * s)
+static void malloc_run_state(Runstate * s, int use_zero_point)
 {
 	s->x = calloc(batch_size * IM2COL_MAX_SZ, sizeof(float));
 	s->x2 = calloc(batch_size * OUTPUT_MAX_SZ, sizeof(float));
@@ -46,6 +46,11 @@ static void malloc_run_state(Runstate * s)
 	s->xq = (QuantizedTensor) {
 	.q = calloc(batch_size * IM2COL_MAX_SZ, sizeof(int8_t)),.s =
 		    calloc(batch_size * IM2COL_MAX_SZ, sizeof(float))};
+	if (use_zero_point) {
+		s->xq.zp = calloc(batch_size * IM2COL_MAX_SZ, sizeof(int));
+	} else {
+		s->xq.zp = NULL;
+	}
 }
 
 static void free_run_state(Runstate * s)
@@ -140,16 +145,6 @@ void dequantize(QuantizedTensor * qx, float *x, int size, int gs)
 	}
 }
 
-void dequantize2d(QuantizedTensor * qx, float *x, int nrows, int ncols, int gs)
-{
-	for (int i = 0; i < nrows; i++) {
-		for (int j = 0; j < ncols; j++) {
-			x[i * ncols + j] =
-			    qx->q[i * ncols + j] * qx->s[(j * nrows + i) / gs];
-		}
-	}
-}
-
 #endif
 
 static void basic_block(QuantizedTensor *xq, float *x, float *x2, float *x3,
@@ -160,18 +155,21 @@ static void basic_block(QuantizedTensor *xq, float *x, float *x2, float *x3,
 	int w_prev = *w;
 
 	im2col_q(x3, x, cc[*i], h, w);
-	quantize2d(xq, x3, cc[*i], (*h) * (*w));
+	quantize(xq, x3, cc[*i].ic * cc[*i].ksize * cc[*i].ksize * (*h) * (*w),
+		 cc[*i].gs_weight);
 	conv_q(x3, xq, p, sf, cc[*i], *h, *w);
 	batchnorm(x, x3, sf, bc[*i], (*h) * (*w));
 	relu(x, cc[*i].oc * (*h) * (*w));
 	im2col_q(x3, x, cc[*i + 1], h, w);
-	quantize2d(xq, x3, cc[*i + 1], (*h) * (*w));
+	quantize(xq, x3, cc[*i + 1].ic * cc[*i + 1].ksize * cc[*i + 1].ksize *
+		 (*h) * (*w), cc[*i + 1].gs_weight);
 	conv_q(x3, xq, p, sf, cc[*i + 1], *h, *w);
 	batchnorm(x, x3, sf, bc[*i + 1], (*h) * (*w));
 	// perform downsampling for skip connection
 	if (downsample) {
 		im2col_q(x3, x2, cc[*i + 2], &h_prev, &w_prev);
-		quantize2d(xq, x3, cc[*i + 2], (*h) * (*w));
+		quantize(xq, x3, cc[*i + 2].ic * cc[*i + 2].ksize *
+			 cc[*i + 2].ksize * (*h) * (*w), cc[*i + 2].gs_weight);
 		conv_q(x3, xq, p, sf, cc[*i + 2], *h, *w);
 		batchnorm(x2, x3, sf, bc[*i + 2], (*h) * (*w));
 	}
@@ -192,23 +190,27 @@ static void basic_block(QuantizedTensor *xq, float *x, float *x2, float *x3,
 	int w_prev = *w;
 
 	im2col_q(x3, x, cc[*i], h, w);
-	quantize2d(xq, x3, cc[*i], (*h) * (*w));
+	quantize(xq, x3, cc[*i].ic * cc[*i].ksize * cc[*i].ksize * (*h) * (*w),
+		 cc[*i].gs_weight);
 	conv_q(x3, xq, p, sf, cc[*i], *h, *w);
 	batchnorm(x, x3, sf, bc[*i], (*h) * (*w));
 	relu(x, cc[*i].oc * (*h) * (*w));
 	im2col_q(x3, x, cc[*i + 1], h, w);
-	quantize2d(xq, x3, cc[*i + 1], (*h) * (*w));
+	quantize(xq, x3, cc[*i + 1].ic * cc[*i + 1].ksize * cc[*i + 1].ksize *
+		 (*h) * (*w), cc[*i + 1].gs_weight);
 	conv_q(x3, xq, p, sf, cc[*i + 1], *h, *w);
 	batchnorm(x, x3, sf, bc[*i + 1], (*h) * (*w));
 	relu(x, cc[*i + 1].oc * (*h) * (*w));
 	im2col_q(x3, x, cc[*i + 2], h, w);
-	quantize2d(xq, x3, cc[*i + 2], (*h) * (*w));
+	quantize(xq, x3, cc[*i + 2].ic * cc[*i + 2].ksize * cc[*i + 2].ksize *
+		 (*h) * (*w), cc[*i + 2].gs_weight);
 	conv_q(x3, xq, p, sf, cc[*i + 2], *h, *w);
 	batchnorm(x, x3, sf, bc[*i + 2], (*h) * (*w));
 	// perform downsampling for skip connection
 	if (downsample) {
 		im2col_q(x3, x2, cc[*i + 3], &h_prev, &w_prev);
-		quantize2d(xq, x3, cc[*i + 3], (*h) * (*w));
+		quantize(xq, x3, cc[*i + 3].ic * cc[*i + 3].ksize *
+			 cc[*i + 3].ksize * (*h) * (*w), cc[*i + 3].gs_weight);
 		conv_q(x3, xq, p, sf, cc[*i + 3], *h, *w);
 		batchnorm(x2, x3, sf, bc[*i + 3], (*h) * (*w));
 	}
@@ -264,7 +266,8 @@ static void basic_block(QuantizedTensor *xq, float *x, float *x2, float *x3,
 		  int *w)
 {
 	im2col_q(x, images, cc[0], h, w);
-	quantize2d(xq, x, cc[0], (*h) * (*w));
+	quantize(xq, x, cc[0].ic * cc[0].ksize * cc[0].ksize * (*h) * (*w),
+		 cc[0].gs_weight);
 	conv_q(x, xq, p, sf, cc[0], *h, *w);
 	batchnorm(x2, x, sf, bc[0], (*h) * (*w));
 	relu(x2, cc[0].oc * (*h) * (*w));
@@ -461,7 +464,7 @@ int main(int argc, char **argv)
 	Runstate state[nthreads];
 	#pragma omp parallel for
 	for (int i = 0; i < nthreads; i++) {
-		malloc_run_state(&state[i]);
+		malloc_run_state(&state[i], model.model_config.use_zero_point);
 	}
 	#pragma omp parallel
 	{

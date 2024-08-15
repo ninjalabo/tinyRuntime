@@ -35,6 +35,7 @@ typedef struct {
 typedef struct {
 	int8_t *q;		// quantized values
 	float *s;		// scaling factors
+	int *zp;		// zero points
 } QuantizedTensor;
 
 typedef struct {
@@ -43,6 +44,7 @@ typedef struct {
 	int nlinear;		// number of linear layers
 	int nbn;		// number of batchnorm layers
 	int nparameters;	// number of parameters
+	int use_zero_point;	// 1 if model uses zero points, 0 otherwise
 } ModelConfigQ;
 
 typedef struct {
