@@ -1,11 +1,10 @@
 name: benchmark
 # Run the workflow if C files are modified
-# FIX: enable workflow
-# on:
-#   push:
+on:
+  push:
 #     paths:
 #       - '**/*.c'
-#   workflow_dispatch:
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -25,7 +24,8 @@ jobs:
         id: depends
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential libatlas-base-dev
+          sudo apt-get install -y build-essential libatlas-base-dev libdnnl-dev
+          lscpu
           git clone https://github.com/flame/blis.git
           cd blis
           ./configure -t openmp auto
@@ -35,7 +35,7 @@ jobs:
 
       - name: Prepare test environment
         run: |
-          make compile BLIS=1 ARCH=x86
+          make compile BLAS=ON
           git clone --branch 1.x https://huggingface.co/datasets/ninjalabo/imagenette2-320 data
           git clone https://huggingface.co/ninjalabo/resnet18 && cp resnet18/model.pkl .
           wget https://raw.githubusercontent.com/ninjalabo/inferences/main/run.py
@@ -57,50 +57,51 @@ jobs:
           name: benchmark-x86
           path: benchmark.csv
 
-  benchmark-mac:
-    name: Benchmark on ARM
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: 3.9
+# FIX: Disable ARM benchmark until ARM compute libraries are available on oneDNN
+#   benchmark-mac:
+#     name: Benchmark on ARM
+#     runs-on: macos-latest
+#     steps:
+#       - uses: actions/checkout@v4
+#       - uses: actions/setup-python@v5
+#         with:
+#           python-version: 3.9
 
-      - name: Dependencies
-        id: depends
-        run: |
-          brew update
-          brew install blis llvm libomp
-          export PATH="/usr/local/opt/llvm/bin:$PATH"
+#       - name: Dependencies
+#         id: depends
+#         run: |
+#           brew update
+#           brew install blis llvm libomp
+#           export PATH="/usr/local/opt/llvm/bin:$PATH"
 
-      - name: Prepare test environment
-        run: |
-          make compile BLIS=1 ARCH=arm
-          git clone --branch 1.x https://huggingface.co/datasets/ninjalabo/imagenette2-320 data
-          git clone https://huggingface.co/ninjalabo/resnet18 && cp resnet18/model.pkl .
-          wget https://raw.githubusercontent.com/ninjalabo/inferences/main/run.py
-          python -m pip install --upgrade pip
-          pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
-          pip install toml psutil huggingface_hub fastai fasterai
+#       - name: Prepare test environment
+#         run: |
+#           make compile BLAS=ON
+#           git clone --branch 1.x https://huggingface.co/datasets/ninjalabo/imagenette2-320 data
+#           git clone https://huggingface.co/ninjalabo/resnet18 && cp resnet18/model.pkl .
+#           wget https://raw.githubusercontent.com/ninjalabo/inferences/main/run.py
+#           python -m pip install --upgrade pip
+#           pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+#           pip install toml psutil huggingface_hub fastai fasterai
 
-      - name: Download benchmark.csv
-        run: |
-          wget https://raw.githubusercontent.com/ninjalabo/ninjalabo.github.io/main/benchmark.csv
+#       - name: Download benchmark.csv
+#         run: |
+#           wget https://raw.githubusercontent.com/ninjalabo/ninjalabo.github.io/main/benchmark.csv
 
-      - name: Run benchmark # Save results to benchmark.csv
-        run: |
-          python benchmark.py
+#       - name: Run benchmark # Save results to benchmark.csv
+#         run: |
+#           python benchmark.py
 
-      - name: Upload benchmark-mac
-        uses: actions/upload-artifact@v4
-        with:
-          name: benchmark-arm
-          path: benchmark.csv
+#       - name: Upload benchmark-mac
+#         uses: actions/upload-artifact@v4
+#         with:
+#           name: benchmark-arm
+#           path: benchmark.csv
 
   benchmark-combine:
     name: Push Final Benchmark Results
     runs-on: ubuntu-latest
-    needs: [benchmark-linux, benchmark-mac]
+    needs: benchmark-linux #, benchmark-mac]
     steps:
       - uses: actions/checkout@v4
 
@@ -111,12 +112,12 @@ jobs:
           name: benchmark-x86
           path: x86
 
-      # Download benchmark.csv from benchmark-mac that contains new ARM results
-      - name: Download benchmark-arm
-        uses: actions/download-artifact@v4
-        with:
-          name: benchmark-arm
-          path: arm
+#       # Download benchmark.csv from benchmark-mac that contains new ARM results
+#       - name: Download benchmark-arm
+#         uses: actions/download-artifact@v4
+#         with:
+#           name: benchmark-arm
+#           path: arm
 
       - name: Download benchmark.csv
         run: |
@@ -124,8 +125,8 @@ jobs:
 
       - name: Combine benchmark results
         run: |
-          cat arm/benchmark.csv | tail -n +2 >> x86/benchmark.csv
           cat x86/benchmark.csv | tail -n +2 >> benchmark.csv
+#           cat arm/benchmark.csv | tail -n +2 >> x86/benchmark.csv
 
       - name: Pushes the output file to another repository
         uses: dmnemec/copy_file_to_another_repo_action@main

@@ -10,8 +10,8 @@
 #include <ctype.h>
 #include <omp.h>
 
-#include "func.h"
 #include "func_q.h"
+#include "func_common.h"
 
 #define IMAGE_SZ (3 * 224 * 224)	// model input image size (all images are resized to this)
 #define IM2COL_MAX_SZ (3 * 49 * 112 * 112)	// maximum array size after im2col
@@ -19,55 +19,74 @@
 #define OUTPUT_MAX_SZ (64 * 112 * 112)	// maximum output size of layers during forward pass
 
 typedef struct {
-	float *x;		// buffer to store the output of a layer (IMAGE_SZ,)
-	float *x2;
-	float *x3;
-	QuantizedTensor xq;	// buffer for quantized arrays
-} Runstate;		// the current state in the forward pass
+	int nclasses;		// number of classes
+	int nconv;		// number of convolutional layers
+	int nlinear;		// number of linear layers
+	int nbn;		// number of batchnorm layers
+	int nactivation;	// number of activation layers
+	int nqparams;		// number of quantized parameters
+	int use_zero_point;	// 1 if model uses zero points, 0 otherwise
+} ModelConfigQ;
 
 typedef struct {
 	ModelConfigQ model_config;
 	ConvConfigQ *conv_config;	// convolutional layers' config
 	LinearConfigQ *linear_config;	// linear layers' config
-	BnConfig *bn_config;	// batchnorm layers' config
-	int8_t *parameters;	// array of all weigths and biases
-	float *scaling_factors;	// array of all scaling factors
-	int fd;			// file descriptor for memory mapping
-	float *data;		// memory mapped data pointer
-	size_t file_size;	// size of the checkpoint file in bytes
-} Model;
+	BnConfig *bn_config;		// batchnorm layers' config
+	ActivationConfigQ *activation_config;	// activation config
+	int8_t *qparam_ptr;		// pointer for all quantized weights and biases
+	float *param_ptr;		// array of all non-quantized weights and biases
+	int fd;				// file descriptor for memory mapping
+	float *data;			// memory mapped data pointer
+	size_t file_size;		// size of the checkpoint file in bytes
+} ModelQ;
 
-static void malloc_run_state(Runstate * s, int use_zero_point)
+
+static void malloc_run_state(Runstate *s, int use_zero_point)
 {
+	// FIX: check if the memory size is optimal for the model
+	#ifdef USE_DQ_FUNC
 	s->x = calloc(batch_size * IM2COL_MAX_SZ, sizeof(float));
 	s->x2 = calloc(batch_size * OUTPUT_MAX_SZ, sizeof(float));
-	s->x3 = calloc(batch_size * IM2COL_SECOND_MAX_SZ, sizeof(float));
-	// FIX: too much memory allocated for `xq.s`. Should be divided by group size
+	s->x3 = calloc(batch_size * IM2COL_MAX_SZ, sizeof(float));
 	s->xq = (QuantizedTensor) {
-	.q = calloc(batch_size * IM2COL_MAX_SZ, sizeof(int8_t)),.s =
-		    calloc(batch_size * IM2COL_MAX_SZ, sizeof(float))};
+	    .q = calloc(batch_size * IM2COL_MAX_SZ, sizeof(int8_t)),
+	    .scale = calloc(batch_size * IM2COL_MAX_SZ, sizeof(float))};
 	if (use_zero_point) {
-		s->xq.zp = calloc(batch_size * IM2COL_MAX_SZ, sizeof(int));
+		s->xq.zero_point =
+		    calloc(batch_size * IM2COL_MAX_SZ, sizeof(int));
 	} else {
-		s->xq.zp = NULL;
+		s->xq.zero_point = NULL;
 	}
+	#else
+	s->x = calloc(batch_size * OUTPUT_MAX_SZ, sizeof(float));
+	s->x2 = calloc(batch_size * OUTPUT_MAX_SZ, sizeof(float));
+	s->xq.q = calloc(batch_size * IM2COL_MAX_SZ, sizeof(uint8_t));
+	s->xq2.q = calloc(batch_size * IM2COL_MAX_SZ, sizeof(uint8_t));
+	s->xq3.q = calloc(batch_size * IM2COL_MAX_SZ, sizeof(uint8_t));
+	#endif
 }
 
-static void free_run_state(Runstate * s)
+static void free_run_state(Runstate *s)
 {
 	free(s->x);
 	free(s->x2);
-	free(s->x3);
 	free(s->xq.q);
-	free(s->xq.s);
+	#ifdef USE_DQ_FUNC
+	free(s->x3);
+	free(s->xq.scale);
+	#else
+	free(s->xq2.q);
+	free(s->xq3.q);
+	#endif
 }
 
-static void read_checkpoint(char *path, ModelConfigQ * mc, ConvConfigQ ** cc,
-			    LinearConfigQ ** lc, BnConfig ** bc,
-			    int8_t ** parameters, float **scaling_factors,
-			    int *fd, float **data, size_t *file_size)
+static void read_checkpoint(char *path, ModelConfigQ *mc, ConvConfigQ **cc,
+			    LinearConfigQ **lc, BnConfig **bc,
+			    ActivationConfigQ **ac, int8_t **qparams,
+			    float **params, int *fd, float **data,
+			    size_t *file_size)
 {
-	// The data inside the file should follow the order: ModelConfigQ -> ConvConfigQ -> LinearConfigQ -> parameters (first CNN parameters then FC parameters)
 	FILE *file = fopen(path, "rb");
 	if (!file) {
 		fprintf(stderr, "Couldn't open file %s\n", path);
@@ -95,20 +114,22 @@ static void read_checkpoint(char *path, ModelConfigQ * mc, ConvConfigQ ** cc,
 	*cc = (ConvConfigQ *) (*data + sizeof(ModelConfigQ) / sizeof(float));
 	*lc = (LinearConfigQ *) (*cc + mc->nconv);
 	*bc = (BnConfig *) (*lc + mc->nlinear);
+	*ac = (ActivationConfigQ *) (*bc + mc->nbn);
 	// memory map weights, biases and scaling factors
-	*parameters = (int8_t *) (*bc + mc->nbn);
-	*scaling_factors = (float *)(*parameters + mc->nparameters);
+	*qparams = (int8_t *) (*ac + mc->nactivation);
+	*params = (float *) (*qparams + mc->nqparams);
 }
 
-static void build_model(Model * m, char *checkpoint_path)
+static void build_model(ModelQ *m, char *checkpoint_path)
 {
 	// read in the Config and the Weights from the checkpoint
 	read_checkpoint(checkpoint_path, &m->model_config, &m->conv_config,
-			&m->linear_config, &m->bn_config, &m->parameters,
-			&m->scaling_factors, &m->fd, &m->data, &m->file_size);
+			&m->linear_config, &m->bn_config,
+			&m->activation_config, &m->qparam_ptr, &m->param_ptr,
+			&m->fd, &m->data, &m->file_size);
 }
 
-static void free_model(Model * m)
+static void free_model(ModelQ *m)
 {
 	// close the memory mapping
 	if (m->data != MAP_FAILED) {
@@ -119,246 +140,92 @@ static void free_model(Model * m)
 	}
 }
 
-#ifdef DEBUG
-// sanity check function for writing tensors,
-// e.g., it can be used to evaluate values after a specific layer.
-static void write_tensor(float *x, int size)
+static void sequential_block(Runstate *s, int8_t *p, float *sf,
+			     ConvConfigQ *cc, ActivationConfigQ *ac, int *h,
+			     int *w, int *i, int *ia, int n, bool downsample)
 {
-	FILE *f = fopen("test2.txt", "w");
-	for (int i = 0; i < size; i++)
-		fprintf(f, "%f\n", x[i]);
-	fclose(f);
-}
-
-static void write_qtensor(int8_t * x, int size)
-{
-	FILE *f = fopen("testq.txt", "w");
-	for (int i = 0; i < size; i++)
-		fprintf(f, "%d\n", x[i]);
-	fclose(f);
-}
-
-void dequantize(QuantizedTensor * qx, float *x, int size, int gs)
-{
-	for (int i = 0; i < size; i++) {
-		x[i] = qx->q[i] * qx->s[i / gs];
+	basic_block(s, p, sf, cc, ac, h, w, i, ia, downsample);
+	for (int j = 0; j < n - 1; j++) {
+		basic_block(s, p, sf, cc, ac, h, w, i, ia, false);
 	}
 }
 
-#endif
-
-static void basic_block(QuantizedTensor *xq, float *x, float *x2, float *x3,
-			int8_t *p, float *sf, ConvConfigQ *cc, BnConfig *bc,
-			int *h, int *w, int *i, bool downsample)
+static void sequential_bottleneck(Runstate *s, int8_t *p, float *sf,
+				  ConvConfigQ *cc, ActivationConfigQ *ac,
+				  int *h, int *w, int *i, int *ia, int n,
+				  bool downsample)
 {
-	int h_prev = *h;
-	int w_prev = *w;
-
-	im2col_q(x3, x, cc[*i], h, w);
-	quantize(xq, x3, cc[*i].ic * cc[*i].ksize * cc[*i].ksize * (*h) * (*w),
-		 cc[*i].gs_weight);
-	conv_q(x3, xq, p, sf, cc[*i], *h, *w);
-	batchnorm(x, x3, sf, bc[*i], (*h) * (*w));
-	relu(x, cc[*i].oc * (*h) * (*w));
-	im2col_q(x3, x, cc[*i + 1], h, w);
-	quantize(xq, x3, cc[*i + 1].ic * cc[*i + 1].ksize * cc[*i + 1].ksize *
-		 (*h) * (*w), cc[*i + 1].gs_weight);
-	conv_q(x3, xq, p, sf, cc[*i + 1], *h, *w);
-	batchnorm(x, x3, sf, bc[*i + 1], (*h) * (*w));
-	// perform downsampling for skip connection
-	if (downsample) {
-		im2col_q(x3, x2, cc[*i + 2], &h_prev, &w_prev);
-		quantize(xq, x3, cc[*i + 2].ic * cc[*i + 2].ksize *
-			 cc[*i + 2].ksize * (*h) * (*w), cc[*i + 2].gs_weight);
-		conv_q(x3, xq, p, sf, cc[*i + 2], *h, *w);
-		batchnorm(x2, x3, sf, bc[*i + 2], (*h) * (*w));
-	}
-
-	int oc = downsample ? cc[*i + 2].oc : cc[*i + 1].oc;
-	int size = oc * (*h) * (*w);
-	*i += downsample ? 3 : 2;
-	matadd(x, x2, size);
-	relu(x, size);
-	matcopy_float(x2, x, size);
-}
-
- static void bottleneck(QuantizedTensor *xq, float *x, float *x2, float *x3,
-			int8_t *p, float *sf, ConvConfigQ *cc, BnConfig *bc,
-			int *h, int *w, int *i, bool downsample)
-{
-	int h_prev = *h;
-	int w_prev = *w;
-
-	im2col_q(x3, x, cc[*i], h, w);
-	quantize(xq, x3, cc[*i].ic * cc[*i].ksize * cc[*i].ksize * (*h) * (*w),
-		 cc[*i].gs_weight);
-	conv_q(x3, xq, p, sf, cc[*i], *h, *w);
-	batchnorm(x, x3, sf, bc[*i], (*h) * (*w));
-	relu(x, cc[*i].oc * (*h) * (*w));
-	im2col_q(x3, x, cc[*i + 1], h, w);
-	quantize(xq, x3, cc[*i + 1].ic * cc[*i + 1].ksize * cc[*i + 1].ksize *
-		 (*h) * (*w), cc[*i + 1].gs_weight);
-	conv_q(x3, xq, p, sf, cc[*i + 1], *h, *w);
-	batchnorm(x, x3, sf, bc[*i + 1], (*h) * (*w));
-	relu(x, cc[*i + 1].oc * (*h) * (*w));
-	im2col_q(x3, x, cc[*i + 2], h, w);
-	quantize(xq, x3, cc[*i + 2].ic * cc[*i + 2].ksize * cc[*i + 2].ksize *
-		 (*h) * (*w), cc[*i + 2].gs_weight);
-	conv_q(x3, xq, p, sf, cc[*i + 2], *h, *w);
-	batchnorm(x, x3, sf, bc[*i + 2], (*h) * (*w));
-	// perform downsampling for skip connection
-	if (downsample) {
-		im2col_q(x3, x2, cc[*i + 3], &h_prev, &w_prev);
-		quantize(xq, x3, cc[*i + 3].ic * cc[*i + 3].ksize *
-			 cc[*i + 3].ksize * (*h) * (*w), cc[*i + 3].gs_weight);
-		conv_q(x3, xq, p, sf, cc[*i + 3], *h, *w);
-		batchnorm(x2, x3, sf, bc[*i + 3], (*h) * (*w));
-	}
-
-	int oc = downsample ? cc[*i + 3].oc : cc[*i + 2].oc;
-	int size = oc * (*h) * (*w);
-	*i += downsample ? 4 : 3;
-	matadd(x, x2, size);
-	relu(x, size);
-	matcopy_float(x2, x, size);
-}
-
- static void sequential_block(QuantizedTensor *xq, float *x, float *x2,
-			      float *x3, int8_t *p, float *sf, ConvConfigQ *cc,
-			      BnConfig *bc, int *h, int *w, int *i, int n,
-			      bool downsample)
-{
-	if (downsample) {
-		basic_block(xq, x, x2, x3, p, sf, cc, bc, h, w, i, true);
-		for (int j = 0; j < n - 1; j++) {
-			basic_block(xq, x, x2, x3, p, sf, cc, bc, h, w, i,
-				    false);
-		}
-	} else {
-		for (int j = 0; j < n; j++) {
-			basic_block(xq, x, x2, x3, p, sf, cc, bc, h, w, i,
-				    false);
-		}
+	bottleneck(s, p, sf, cc, ac, h, w, i, ia, downsample);
+	for (int j = 0; j < n - 1; j++) {
+		bottleneck(s, p, sf, cc, ac, h, w, i, ia, false);
 	}
 }
 
- static void sequential_bottleneck(QuantizedTensor *xq, float *x, float *x2,
-				   float *x3, int8_t *p, float *sf,
-				   ConvConfigQ *cc, BnConfig *bc, int *h,
-				   int *w, int *i, int n, bool downsample)
+static void resnet18(Runstate *s, float *images, int8_t *p, float *sf,
+		     ConvConfigQ *cc, LinearConfigQ *lc, BnConfig *bc,
+		     ActivationConfigQ *ac, int h, int w)
 {
-	if (downsample) {
-		bottleneck(xq, x, x2, x3, p, sf, cc, bc, h, w, i, true);
-		for (int j = 0; j < n - 1; j++) {
-			bottleneck(xq, x, x2, x3, p, sf, cc, bc, h, w, i,
-				   false);
-		}
-	} else {
-		for (int j = 0; j < n; j++) {
-			bottleneck(xq, x, x2, x3, p, sf, cc, bc, h, w, i,
-				   false);
-		}
-	}
-}
-
- static void head(QuantizedTensor *xq, float *x, float *x2, float *images,
-		  int8_t *p, float *sf, ConvConfigQ *cc, BnConfig *bc, int *h,
-		  int *w)
-{
-	im2col_q(x, images, cc[0], h, w);
-	quantize(xq, x, cc[0].ic * cc[0].ksize * cc[0].ksize * (*h) * (*w),
-		 cc[0].gs_weight);
-	conv_q(x, xq, p, sf, cc[0], *h, *w);
-	batchnorm(x2, x, sf, bc[0], (*h) * (*w));
-	relu(x2, cc[0].oc * (*h) * (*w));
-	maxpool(x, x2, h, w, cc[0].oc, 3, 2, 1);
-	matcopy_float(x2, x, cc[0].oc * (*h) * (*w));
-}
-
- static void tail(QuantizedTensor *xq, float *x, float *x2, float *x3,
-		  int8_t *p, float *sf, ConvConfigQ *cc, LinearConfigQ *lc,
-		  BnConfig *bc, int h, int w, int i)
-{
-	concat_pool(x2, x, &h, &w, cc[i - 1].oc, h, 1, 0);
-	batchnorm(x, x2, sf, bc[i], 1);
-	quantize(xq, x, lc[0].in, lc[0].gs_weight);
-	linear_q(x2, xq, p, sf, lc[0]);
-	relu(x2, lc[0].out);
-	batchnorm(x, x2, sf, bc[i + 1], 1);
-	quantize(xq, x, lc[1].in, lc[1].gs_weight);
-	linear_q(x2, xq, p, sf, lc[1]);
-	matcopy_float(x, x2, lc[1].out);
-}
-
- static void resnet18(QuantizedTensor *xq, float *x, float *x2, float *x3,
-		      float *images, int8_t *p, float *sf, ConvConfigQ *cc,
-		      LinearConfigQ *lc, BnConfig *bc, int h, int w)
-{
-	head(xq, x, x2, images, p, sf, cc, bc, &h, &w);
+	head(s, images, p, sf, cc, ac, &h, &w);
 	int i = 1; // take care of which convolutional layer to use
+	int ia = 2; // take care of which activation layer to use
 	// 2 BasicBlocks, no downsampling
-	sequential_block(xq, x, x2, x3, p, sf, cc, bc, &h, &w, &i, 2, false);
+	sequential_block(s, p, sf, cc, ac, &h, &w, &i, &ia, 2, false);
 	// 2 BasicBlocks, with one downsampling block
-	sequential_block(xq, x, x2, x3, p, sf, cc, bc, &h, &w, &i, 2, true);
+	sequential_block(s, p, sf, cc, ac, &h, &w, &i, &ia, 2, true);
 	// 2 BasicBlocks, with one downsampling block
-	sequential_block(xq, x, x2, x3, p, sf, cc, bc, &h, &w, &i, 2, true);
+	sequential_block(s, p, sf, cc, ac, &h, &w, &i, &ia, 2, true);
 	// 2 BasicBlocks, with one downsampling block
-	sequential_block(xq, x, x2, x3, p, sf, cc, bc, &h, &w, &i, 2, true);
+	sequential_block(s, p, sf, cc, ac, &h, &w, &i, &ia, 2, true);
 	// fine tuned layers
-	tail(xq, x, x2, x3, p, sf, cc, lc, bc, h, w, i);
+	tail(s, p, sf, cc, lc, bc, ac, h, w, i, ia);
 }
 
- static void resnet34(QuantizedTensor *xq, float *x, float *x2, float *x3,
-		      float *images, int8_t *p, float *sf, ConvConfigQ *cc,
-		      LinearConfigQ *lc, BnConfig *bc, int h, int w)
+static void resnet34(Runstate *s, float *images, int8_t *p, float *sf,
+		     ConvConfigQ *cc, LinearConfigQ *lc, BnConfig *bc,
+		     ActivationConfigQ *ac, int h, int w)
 {
-	head(xq, x, x2, images, p, sf, cc, bc, &h, &w);
+	head(s, images, p, sf, cc, ac, &h, &w);
 	int i = 1; // take care of which convolutional layer to use
+	int ia = 2; // take care of which activation layer to use
 	// 3 BasicBlocks, no downsampling
-	sequential_block(xq, x, x2, x3, p, sf, cc, bc, &h, &w, &i, 3, false);
+	sequential_block(s, p, sf, cc, ac, &h, &w, &i, &ia, 3, false);
 	// 4 BasicBlocks, with one downsampling block
-	sequential_block(xq, x, x2, x3, p, sf, cc, bc, &h, &w, &i, 4, true);
+	sequential_block(s, p, sf, cc, ac, &h, &w, &i, &ia, 4, true);
 	// 6 BasicBlocks, with one downsampling block
-	sequential_block(xq, x, x2, x3, p, sf, cc, bc, &h, &w, &i, 6, true);
+	sequential_block(s, p, sf, cc, ac, &h, &w, &i, &ia, 6, true);
 	// 3 BasicBlocks, with one downsampling block
-	sequential_block(xq, x, x2, x3, p, sf, cc, bc, &h, &w, &i, 3, true);
+	sequential_block(s, p, sf, cc, ac, &h, &w, &i, &ia, 3, true);
 	// fine tuned layers
-	tail(xq, x, x2, x3, p, sf, cc, lc, bc, h, w, i);
+	tail(s, p, sf, cc, lc, bc, ac, h, w, i, ia);
 }
 
- static void resnet50(QuantizedTensor *xq, float *x, float *x2, float *x3,
-		      float *images, int8_t *p, float *sf, ConvConfigQ *cc,
-		      LinearConfigQ *lc, BnConfig *bc, int h, int w)
+static void resnet50(Runstate *s, float *images, int8_t *p, float *sf,
+		     ConvConfigQ *cc, LinearConfigQ *lc, BnConfig *bc,
+		     ActivationConfigQ *ac, int h, int w)
 {
-	head(xq, x, x2, images, p, sf, cc, bc, &h, &w);
+	head(s, images, p, sf, cc, ac, &h, &w);
 	int i = 1; // take care of which convolutional layer to use
+	int ia = 2; // take care of which activation layer to use
 	// 3 Bottlenecks, with one downsampling block
-	sequential_bottleneck(xq, x, x2, x3, p, sf, cc, bc, &h, &w, &i, 3,
-			      true);
+	sequential_bottleneck(s, p, sf, cc, ac, &h, &w, &i, &ia, 3, true);
 	// 4 Bottlenecks, with one downsampling block
-	sequential_bottleneck(xq, x, x2, x3, p, sf, cc, bc, &h, &w, &i, 4,
-			      true);
+	sequential_bottleneck(s, p, sf, cc, ac, &h, &w, &i, &ia, 4, true);
 	// 6 Bottlenecks, with one downsampling block
-	sequential_bottleneck(xq, x, x2, x3, p, sf, cc, bc, &h, &w, &i, 6,
-			      true);
+	sequential_bottleneck(s, p, sf, cc, ac, &h, &w, &i, &ia, 6, true);
 	// 3 Bottlenecks, with one downsampling block
-	sequential_bottleneck(xq, x, x2, x3, p, sf, cc, bc, &h, &w, &i, 3,
-			      true);
+	sequential_bottleneck(s, p, sf, cc, ac, &h, &w, &i, &ia, 3, true);
 	// fine tuned layers
-	tail(xq, x, x2, x3, p, sf, cc, lc, bc, h, w, i);
+	tail(s, p, sf, cc, lc, bc, ac, h, w, i, ia);
 }
 
-static void forward(Model *m, Runstate *s, float *images)
+static void forward(ModelQ *m, Runstate *s, float *images)
 {
 	ConvConfigQ *cc = m->conv_config;
 	LinearConfigQ *lc = m->linear_config;
 	BnConfig *bc = m->bn_config;
-	int8_t *p = m->parameters;
-	float *sf = m->scaling_factors;
-	float *x = s->x;
-	float *x2 = s->x2;
-	float *x3 = s->x3;
-	QuantizedTensor xq = s->xq;
+	ActivationConfigQ *ac = m->activation_config;
+	int8_t *p = m->qparam_ptr;
+	float *sf = m->param_ptr;
 
 	int h = 224; // height
 	int w = 224; // width
@@ -366,11 +233,11 @@ static void forward(Model *m, Runstate *s, float *images)
 	// select the right model based on the number of convolutional layers
 	int nconv = m->model_config.nconv;
 	if (nconv == 20)
-		resnet18(&xq, x, x2, x3, images, p, sf, cc, lc, bc, h, w);
+		resnet18(s, images, p, sf, cc, lc, bc, ac, h, w);
 	else if (nconv == 36)
-		resnet34(&xq, x, x2, x3, images, p, sf, cc, lc, bc, h, w);
+		resnet34(s, images, p, sf, cc, lc, bc, ac, h, w);
 	else if (nconv == 53)
-		resnet50(&xq, x, x2, x3, images, p, sf, cc, lc, bc, h, w);
+		resnet50(s, images, p, sf, cc, lc, bc, ac, h, w);
 	else {
 		fprintf(stderr, "Invalid structure size. Make sure you have the right model.\n");
 		exit(EXIT_FAILURE);
@@ -445,7 +312,7 @@ int main(int argc, char **argv)
 	int argv_idx = is_test ? 2 : 1;
 	// build model
 	model_path = argv[argv_idx];
-	Model model;
+	ModelQ model;
 	build_model(&model, model_path);
 	// define variables
 	image_paths = &argv[argv_idx + 1];
@@ -479,7 +346,7 @@ int main(int argc, char **argv)
 		for (int i = 0; i < niter; i++) {
 			// define batch size for this iteration to handle the last batch
 			int bs_iter = batch_size;
-			if (i == niter -1 && nimages % batch_size != 0) {
+			if (i == niter - 1 && nimages % batch_size != 0) {
 				bs_iter = nimages % batch_size;
 			}
 			get_labels(thread_labels, &image_paths[i * batch_size],

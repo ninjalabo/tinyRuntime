@@ -11,6 +11,7 @@
 #include <omp.h>
 
 #include "func.h"
+#include "func_common.h"
 
 #define IMAGE_SZ (3 * 224 * 224)	// model input image size (all images are resized to this)
 #define IM2COL_MAX_SZ (3 * 49 * 112 * 112)	// maximum array size after im2col
@@ -24,33 +25,40 @@ typedef struct {
 } Runstate;		// the current state in the forward pass
 
 typedef struct {
+	int nclasses;		// number of classes
+	int nconv;		// number of convolutional layers
+	int nlinear;		// number of linear layers
+	int nbn;		// number of batchnorm layers
+} ModelConfig;
+
+typedef struct {
 	ModelConfig model_config;
 	ConvConfig *conv_config;	// convolutional layers' config
 	LinearConfig *linear_config;	// linear layers' config
 	BnConfig *bn_config;		// batchnorm layers' config
-	float *parameters;	// array of all weigths and biases
-	int fd;			// file descriptor for memory mapping
-	float *data;		// memory mapped data pointer
-	size_t file_size;	// size of the checkpoint file in bytes
+	float *param_ptr;		// pointer for all weigths and biases
+	int fd;				// file descriptor for memory mapping
+	float *data;			// memory mapped data pointer
+	size_t file_size;		// size of the checkpoint file in bytes
 } Model;
 
-static void malloc_run_state(Runstate * s)
+static void malloc_run_state(Runstate *s)
 {
 	s->x = calloc(batch_size * IM2COL_MAX_SZ, sizeof(float));
 	s->x2 = calloc(batch_size * OUTPUT_MAX_SZ, sizeof(float));
 	s->x3 = calloc(batch_size * IM2COL_SECOND_MAX_SZ, sizeof(float));
 }
 
-static void free_run_state(Runstate * s)
+static void free_run_state(Runstate *s)
 {
 	free(s->x);
 	free(s->x2);
 	free(s->x3);
 }
 
-static void read_checkpoint(char *path, ModelConfig * mc, ConvConfig ** cc,
-			    LinearConfig ** lc, BnConfig ** bc,
-			    float **parameters, int *fd, float **data,
+static void read_checkpoint(char *path, ModelConfig * mc, ConvConfig **cc,
+			    LinearConfig **lc, BnConfig **bc,
+			    float **params, int *fd, float **data,
 			    size_t *file_size)
 {
 	FILE *file = fopen(path, "rb");
@@ -81,18 +89,18 @@ static void read_checkpoint(char *path, ModelConfig * mc, ConvConfig ** cc,
 	*lc = (LinearConfig *) (*cc + mc->nconv);
 	*bc = (BnConfig *) (*lc + mc->nlinear);
 	// memory map weights and biases
-	*parameters = (float *) (*bc + mc->nbn);
+	*params = (float *) (*bc + mc->nbn);
 }
 
-static void build_model(Model * m, char *checkpoint_path)
+static void build_model(Model *m, char *checkpoint_path)
 {
 	// read in the Config and the Weights from the checkpoint
 	read_checkpoint(checkpoint_path, &m->model_config, &m->conv_config,
-			&m->linear_config, &m->bn_config, &m->parameters,
+			&m->linear_config, &m->bn_config, &m->param_ptr,
 			&m->fd, &m->data, &m->file_size);
 }
 
-static void free_model(Model * m)
+static void free_model(Model *m)
 {
 	// close the memory mapping
 	if (m->data != MAP_FAILED) {
@@ -102,18 +110,6 @@ static void free_model(Model * m)
 		close(m->fd);
 	}
 }
-
-#ifdef DEBUG
-// sanity check function for writing tensors, e.g., it can be used to evaluate values after a specific layer.
-static void write_tensor(float *x, int size)
-{
-	FILE *f = fopen("test.txt", "wb");
-	// for (int i = 0; i < size; i++)
-	// 	fprintf(f, "%f\n", x[i]);
-	fwrite(x, sizeof(float), size, f);
-	fclose(f);
-}
-#endif
 
 static void basic_block(float *x, float *x2, float *x3, float *p,
 			ConvConfig *cc, int *h, int *w, int *i,
@@ -283,7 +279,7 @@ static void forward(Model *m, Runstate *s, float *images)
 	ConvConfig *cc = m->conv_config;
 	LinearConfig *lc = m->linear_config;
 	BnConfig *bc = m->bn_config;
-	float *p = m->parameters;
+	float *p = m->param_ptr;
 	float *x = s->x;
 	float *x2 = s->x2;
 	float *x3 = s->x3;

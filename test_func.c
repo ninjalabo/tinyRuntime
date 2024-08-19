@@ -3,6 +3,7 @@
 #include <math.h>
 #include <string.h>
 
+#include "func_common.h"
 #include "func.h"
 #include "func_q.h"
 
@@ -20,6 +21,8 @@ TEST_GROUP(TestGroup)
         void teardown() {
         }
 };
+
+#ifdef USE_DQ_FUNC // func.c and func_dq.c
 
 TEST(TestGroup, ReadImagenette)
 {
@@ -73,7 +76,7 @@ TEST(TestGroup, Linear)
 		qx_q[i] = i / 18;
         for (int i = 0; i < batch_size * in / gs_w; i++)
 		qx_sf[i] = i;
-        QuantizedTensor qx = {.q = qx_q, .s = qx_sf, .zp = NULL};
+        QuantizedTensor qx = {.q = qx_q, .scale = qx_sf, .zero_point = NULL};
         int8_t pq[size_q];
         float sf[size_s];
         for (int i = 0; i < size_q; i++)
@@ -96,7 +99,7 @@ TEST(TestGroup, Linear)
 	int qx_zp[batch_size * in / gs_w];
 	for (int i = 0; i < batch_size * in / gs_w; i++)
 		qx_zp[i] = 1;
-	qx.zp = qx_zp;
+	qx.zero_point = qx_zp;
 	// fill first half sf_zp by scales and zero points
 	int w_sf_size = in * out / gs_w;
 	int b_sf_size = out / gs_b;
@@ -150,8 +153,8 @@ TEST(TestGroup, Im2col)
 		0.0f, 11.0f, 0.0f, 0.0f, 0.0f, 15.0f, 0.0f, 0.0f,
 		12.0f, 0.0f, 0.0f, 0.0f, 16.0f, 0.0f, 0.0f, 0.0f,
         };
-        MEMCMP_EQUAL(ref, col, col_size * sizeof(float));
-        MEMCMP_EQUAL(ref, col_q, col_size * sizeof(float));
+        MEMCMP_EQUAL(ref, col, batch_size * col_size * sizeof(float));
+        MEMCMP_EQUAL(ref, col_q, batch_size * col_size * sizeof(float));
         DOUBLES_EQUAL(h, hq, TOL);
         DOUBLES_EQUAL(w, wq, TOL);
 }
@@ -189,7 +192,7 @@ TEST(TestGroup, Conv)
 		qx_q[i] = i / 20;
         for (int i = 0; i < size_x / gs_w; i++)
 		qx_sf[i] = i;
-        QuantizedTensor qx = {.q = qx_q,.s = qx_sf, .zp = NULL};
+        QuantizedTensor qx = {.q = qx_q, .scale = qx_sf, .zero_point = NULL};
         int8_t pq[size_q];
         float sf[size_s];
         for (int i = 0; i < size_q; i++)
@@ -216,7 +219,7 @@ TEST(TestGroup, Conv)
 	int qx_zp[size_x / gs_w];
 	for (int i = 0; i < size_x / gs_w; i++)
 		qx_zp[i] = 1;
-	qx.zp = qx_zp;
+	qx.zero_point = qx_zp;
 	// fill first half sf_zp by scales and zero points
 	int w_sf_size = nrows * oc / gs_w;
 	int b_sf_size = oc / gs_b;
@@ -273,7 +276,7 @@ TEST(TestGroup, Pool)
         int out_size = nch * h_after * w_after;
 
         float x[] = { 1.0f, -1.0f, 2.0f, -2.0f};
-	float refs[2][batch_size * out_size];
+	float refs[4][batch_size * out_size];
 	float ref_max[] =
 	    { 1.0f, 1.0f, 1.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f,
 	    2.0f, 2.0f, 2.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f };
@@ -282,12 +285,15 @@ TEST(TestGroup, Pool)
             0.5f, 0.5f, 0.5f, 0.5f, -0.5f, -0.5f, -0.5f, -0.5f };
 	memcpy(refs[0], ref_max, batch_size * out_size * sizeof(float));
 	memcpy(refs[1], ref_avg, batch_size * out_size * sizeof(float));
+	memcpy(refs[2], ref_max, batch_size * out_size * sizeof(float));
+	memcpy(refs[3], ref_avg, batch_size * out_size * sizeof(float));
         int h, w;
         float xout[batch_size * out_size];
         void (*pool_functions[])(float *, float *, int *, int *, int, int, int,
-                                 int) = { maxpool, avgpool };
+                                 int) =
+				     { maxpool, avgpool, maxpool_q, avgpool_q };
 
-        for (int i = 0; i < 2; i++) {
+        for (int i = 0; i < 4; i++) {
                 h = h_before;
                 w = w_before;
 
@@ -335,6 +341,11 @@ TEST(TestGroup, Relu)
         for (int i = 0; i < 4; i ++) {
                 DOUBLES_EQUAL(ref[i], x[i], TOL);
         }
+	float x2[] = { 1.0f, -1.0f, 2.0f, -2.0f };
+	relu_q(x2, 2);
+	for (int i = 0; i < 4; i++) {
+		DOUBLES_EQUAL(ref[i], x[i], TOL);
+	}
 }
 
 TEST(TestGroup, Softmax)
@@ -351,9 +362,15 @@ TEST(TestGroup, Matcopy)
 	float x[] = { 1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f };
 	float xout[batch_size * size];
 	matcopy_float(xout, x, size);
-	for (int i = 0; i < batch_size * size; i++) {
-		DOUBLES_EQUAL(xout[i], x[i], TOL);
-	}
+	MEMCMP_EQUAL(x, xout, batch_size * size * sizeof(float));
+
+	uint8_t qx_q[] = { 1, 2, 3, 4, 5, 6 };
+	UQuantizedTensor qx = { .q = qx_q, .scale = 2.0f, .zero_point = 1 };
+	uint8_t qx_out_q[batch_size * size];
+	UQuantizedTensor qx_out =
+	    { .q = qx_out_q, .scale = 0.0f, .zero_point = 0 };
+	matcopy_uqtensor(&qx_out, &qx, size);
+	MEMCMP_EQUAL(qx.q, qx_out.q, batch_size * size * sizeof(uint8_t));
 }
 
 TEST(TestGroup, Quantize)
@@ -363,24 +380,166 @@ TEST(TestGroup, Quantize)
 	float x[] = { 1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f };
 	int8_t qx_q[batch_size * size];
 	float qx_s[batch_size * size / gs];
-	QuantizedTensor qx = {.q = qx_q,.s = qx_s, .zp = NULL};
+	QuantizedTensor qx = {.q = qx_q, .scale = qx_s, .zero_point = NULL};
 	quantize(&qx, x, size, gs);
 	float ref_sf[] =
 	    { 2.0f / Q_MAX, 4.0f / Q_MAX, 6.0f / Q_MAX, 8.0f / Q_MAX };
 	int8_t ref_q[] = { 64, 127, 95, 127, 106, 127, 111, 127 };
 	for (int i = 0; i < batch_size * size / gs; i++) {
-		DOUBLES_EQUAL(ref_sf[i], qx.s[i], TOL);
+		DOUBLES_EQUAL(ref_sf[i], qx.scale[i], TOL);
 	}
 	MEMCMP_EQUAL(ref_q, qx.q, batch_size * size * sizeof(int8_t));
 	// with zero point
 	int zp[batch_size * size / gs];
-	qx.zp = zp;
+	qx.zero_point = zp;
 	quantize(&qx, x, size, gs);
 	int8_t ref_q2[] = { -128, 127, -128, 127, -128, 127, -128, 127 };
 	float ref_sf2[] =
 	    { 1.0f / Q_RANGE, 1.0f / Q_RANGE, 1.0f / Q_RANGE, 1.0f / Q_RANGE};
 	for (int i = 0; i < batch_size * size / gs; i++) {
-		DOUBLES_EQUAL(ref_sf2[i], qx.s[i], TOL);
+		DOUBLES_EQUAL(ref_sf2[i], qx.scale[i], TOL);
 	}
 	MEMCMP_EQUAL(ref_q2, qx.q, batch_size * size * sizeof(int8_t));
 }
+
+#else // func_sq.c
+
+TEST(TestGroup, Linear)
+{
+	int in = 2, out = 2, offset = 1, zero_point = 1, out_zero_point = 2;
+	int has_bias = 1;
+	float scale = 1.0f, out_scale = 0.1f;
+
+	uint8_t qx_q[] = { 1, 2, 3, 4 };
+	UQuantizedTensor qx = { .q = qx_q, .scale = 2.0f, .zero_point = 2 };
+	int8_t p[offset + in * out + 4 * out];
+	for (int i = 0; i < offset + in * out; i++)
+		p[i] = i;
+	int32_t *bias = (int32_t*) (p + offset + in * out);
+	for (int i = 0; i < out; i++)
+		bias[i] = i + 1;
+	LinearConfigQ lc =
+	    { in, out, offset, scale, zero_point, out_scale, out_zero_point,
+	    has_bias };
+	uint8_t qx_out_q[batch_size * out];
+	UQuantizedTensor qx_out =
+	    { .q = qx_out_q, .scale = 0.0f, .zero_point = 0 };
+	linear_q(&qx_out, &qx, p, lc);
+
+	uint8_t ref[] = { 22, 2, 62, 202 };
+	DOUBLES_EQUAL(lc.out_scale, qx_out.scale, TOL);
+	DOUBLES_EQUAL(lc.out_zero_point, qx_out.zero_point, TOL);
+	MEMCMP_EQUAL(ref, qx_out_q, batch_size * out * sizeof(uint8_t));
+}
+
+TEST(TestGroup, Im2col)
+{
+	int h = 2, w = 2, ksize = 2, stride = 2, pad = 1, ic = 2;
+	uint8_t zp = 5;
+	int col_size = ksize * ksize * ic * h * w;
+
+	uint8_t im_q[] =
+		{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 };
+	UQuantizedTensor im = { .q = im_q, .scale = 2.0f, .zero_point = zp };
+	ConvConfigQ cc =
+		{ ksize, stride, pad, ic, 0, 0, 0.0f, 0, 0.0f, 0, 0 }; // 0 not used
+	uint8_t col_q[batch_size * col_size];
+	UQuantizedTensor col = { .q = col_q, .scale = 0.0f, .zero_point = 0 };
+	im2col_q(&col, &im, cc, &h, &w);
+
+	uint8_t ref[] = {
+		zp, zp, zp, 1, zp, zp, zp, 5, zp, zp, 2, zp, zp, zp, 6, zp,
+		zp, 3, zp, zp, zp, 7, zp, zp, 4, zp, zp, zp, 8, zp, zp, zp,
+		zp, zp, zp, 9, zp, zp, zp, 13, zp, zp, 10, zp, zp, zp, 14, zp,
+		zp, 11, zp, zp, zp, 15, zp, zp, 12, zp, zp, zp, 16, zp, zp, zp
+	};
+	DOUBLES_EQUAL(im.scale, col.scale, TOL);
+	DOUBLES_EQUAL(im.zero_point, col.zero_point, TOL);
+	MEMCMP_EQUAL(ref, col.q, col_size * sizeof(uint8_t));
+}
+
+TEST(TestGroup, Conv)
+{
+	int h = 1, w = 1, ksize = 2, stride = 1, pad = 1, ic = 1, oc = 2;
+	int offset = 1, has_bias = 1, zero_point = 1, out_zero_point = 2;
+	float scale = 1.0f, out_scale = 3.0f;
+
+	uint8_t qx_q[] = { 1, 2, 3, 4, 5, 6, 7, 8 };
+	UQuantizedTensor qx = {.q = qx_q, .scale = 2.0f, .zero_point = 2};
+	int w_size = ic * oc * ksize * ksize;
+	int8_t p[offset + w_size + 4 * oc];
+	for (int i = 0; i < offset + w_size; i++)
+		p[i] = i;
+	int32_t *bias = (int32_t*) (p + offset + w_size);
+	for (int i = 0; i < oc; i++)
+		bias[i] = i + 1;
+	ConvConfigQ cc =
+	    { ksize, stride, pad, ic, oc, offset, scale, zero_point, out_scale,
+	    out_zero_point, has_bias };
+	uint8_t qx_out_q[batch_size * oc * h * w];
+	UQuantizedTensor qx_out =
+	    {.q = qx_out_q, .scale = 0.0f, .zero_point = 0};
+	conv_q(&qx_out, &qx, p, cc, h, w);
+
+	uint8_t ref[] = { 8, 14, 24, 73 };
+	DOUBLES_EQUAL(cc.out_scale, qx_out.scale, TOL);
+	DOUBLES_EQUAL(cc.out_zero_point, qx_out.zero_point, TOL);
+	MEMCMP_EQUAL(ref, qx_out.q, batch_size * oc * h * w * sizeof(uint8_t));
+}
+
+TEST(TestGroup, Maxpool)
+{
+	int nch = 2, h_before = 1, w_before = 1;
+	int ksize = 2, stride = 1, pad = 1;
+	int h_after = 2, w_after = 2;
+	int out_size = nch * h_after * w_after;
+
+	uint8_t qx_q[] = { 1, 2, 3, 4 };
+	UQuantizedTensor qx = { .q = qx_q, .scale = 1.0f, .zero_point = 1 };
+	uint8_t ref[] = { 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4 };
+	uint8_t qx_out_q[batch_size * out_size];
+	UQuantizedTensor qx_out =
+	    {.q = qx_out_q, .scale = 0.0f, .zero_point = 0};
+	int h = h_before;
+	int w = w_before;
+	maxpool_q(&qx_out, &qx, &h, &w, nch, ksize, stride, pad);
+	DOUBLES_EQUAL(h_after, h, TOL);
+	DOUBLES_EQUAL(w_after, w, TOL);
+	DOUBLES_EQUAL(qx.scale, qx_out.scale, TOL);
+	DOUBLES_EQUAL(qx.zero_point, qx_out.zero_point, TOL);
+	MEMCMP_EQUAL(ref, qx_out.q, batch_size * out_size * sizeof(uint8_t));
+}
+
+TEST(TestGroup, Relu)
+{
+	int size = 2;
+	uint8_t qx_q[] = { 1, 2, 3, 4 };
+	UQuantizedTensor qx = {.q = qx_q, .scale = 0.0f, .zero_point = 2};
+	uint8_t ref[] = { 2, 2, 3, 4 };
+	relu_q(&qx, size);
+	MEMCMP_EQUAL(ref, qx.q, batch_size * size * sizeof(uint8_t));
+}
+
+TEST(TestGroup, Quantize_Dequantize)
+{
+	// quantize
+	int size = 2, scale = 2.0f, zero_point = 1;
+	float x[] = { 2.0f, 4.0f, 6.0f, 8.0f };
+	uint8_t qx_q[batch_size * size];
+	UQuantizedTensor qx = { .q = qx_q, .scale = 0.0f, .zero_point = 0 };
+	quantize(&qx, x, scale, zero_point, size);
+	uint8_t ref_q[] = { 2, 3, 4, 5 };
+	MEMCMP_EQUAL(ref_q, qx.q, batch_size * size * sizeof(int8_t));
+	DOUBLES_EQUAL(scale, qx.scale, TOL);
+	DOUBLES_EQUAL(zero_point, qx.zero_point, TOL);
+
+	// dequantize
+	float xout[batch_size * size];
+	dequantize(xout, &qx, size);
+	float ref[] = { 2.0f, 4.0f, 6.0f, 8.0f };
+	for (int i = 0; i < batch_size * size; i++) {
+		DOUBLES_EQUAL(ref[i], xout[i], TOL);
+	}
+}
+
+#endif

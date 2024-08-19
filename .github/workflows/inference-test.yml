@@ -20,7 +20,7 @@ jobs:
         id: depends
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential libatlas-base-dev cpputest
+          sudo apt-get install -y build-essential libatlas-base-dev cpputest libdnnl-dev
           git clone https://github.com/flame/blis.git
           cd blis
           ./configure -t openmp auto
@@ -36,21 +36,18 @@ jobs:
       - name: Pip setup
         run: |
           python -m pip install --upgrade pip
+          pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cpu
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
-      - name: Run original implementation
+      - name: Test C functions
         run: |
           make ut
-          make compile
           ./ut
-          pytest test_all.py
+          make ut QUANT_TYPE=DQ
+          ./ut
 
-      # FIX: compiled optimized quantized inference once it's ready
-      - name: Run optimized implementation
+      - name: Test all inferences (vanilla, dynamic q, static q)
         run: |
-          make ut BLIS=1
-          make compile BLIS=1
-          ./ut
           pytest test_all.py
 
       - name: Run Python notebooks
@@ -77,7 +74,7 @@ jobs:
         id: depends
         run: |
           brew update
-          brew install cpputest blis llvm libomp
+          brew install cpputest blis llvm libomp onednn
           export PATH="/usr/local/opt/llvm/bin:$PATH"
 
       - name: Set up Python 3.11
@@ -88,21 +85,18 @@ jobs:
       - name: Pip setup
         run: |
           python -m pip install --upgrade pip
+          pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cpu
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
-      - name: Run original implementation
+      - name: Test C functions
         run: |
           make ut
-          make compile
           ./ut
-          pytest test_all.py
-
-      # FIX: compiled optimized quantized inference once it's ready
-      - name: Run optimized implementation
+          make ut QUANT_TYPE=DQ
+          ./ut
+  
+      - name: Test all inferences (vanilla, dynamic q, static q)
         run: |
-          make ut BLIS=1
-          make compile BLIS=1
-          ./ut
           pytest test_all.py
 
       - name: Run Python notebooks

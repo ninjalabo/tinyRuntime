@@ -11,8 +11,9 @@ import torch
 import csv
 from datetime import datetime
 import platform
+from fastai.vision.all import *
 
-from export import export_model, export_modelq8
+from export import export_model, Quantizer, export_model_sq8
 from train import load
 
 def run_c(dir_path, base_command, model_path):
@@ -78,16 +79,20 @@ def run_python(dir_path, model_path):
 path = "data"
 model = load("resnet18").model
 export_model(model, "model.bin")
-export_modelq8(model, "model-q8.bin")
+
+dls = ImageDataLoaders.from_folder(untar_data(URLs.IMAGENETTE_320), valid='val', item_tfms=Resize(224),
+                                   batch_tfms=Normalize.from_stats(*imagenet_stats), bs=64)
+model_prepared, qmodel = Quantizer().quantize_one_batch(model, dls.one_batch()[0])
+export_model_sq8(qmodel, model_prepared, "model-q8.bin")
 
 def compare_results(res, architecture, runtime, quantized):
     '''Compare the results and fail if performance is worse compared to the previous result'''
     df = pd.read_csv("benchmark.csv")
     df = df[(df["Architecture"] == architecture) & (df["Runtime"] == runtime) & (df["Quantization"] == quantized)]
     if res["Accuracy"] < 0.9 * df["Accuracy"].values[-1]:
-        raise ValueError(f"{runtime} - {quantized}: Accuracy is worse than 10%")
+        raise ValueError(f"{runtime} - {quantized}: Accuracy is worse than 10%. Before: {df['Accuracy'].values[-1]}, Now: {res['Accuracy']}")
     if res["Time"] > 1.25 * df["Time"].values[-1]:
-        raise ValueError("{runtime} - {quantized}: Time is worse than 25%.")
+        raise ValueError(f"{runtime} - {quantized}: Time is worse than 25%. Before: {df['Time'].values[-1]}, Now: {res['Time']}")
 
 def save_benchmark_csv():
     # Get results
