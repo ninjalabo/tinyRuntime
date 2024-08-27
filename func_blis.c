@@ -1,7 +1,38 @@
 #include <blis/blis.h>
 
-#include "properties.h"
+#include "config_common.h"
+#include "config_vanilla.h"
 #include "func_common.h"
+
+void im2col(float *col, float *im, ConvConfig cc, int *height, int *width)
+{
+	im2col_generic(col, im, height, width, cc.ic, cc.ksize, cc.stride,
+		       cc.pad, FLOAT);
+}
+
+void maxpool(float *xout, float *x, int *height, int *width, int nchannels,
+	     int ksize, int stride, int pad)
+{
+	pool_generic(xout, x, height, width, nchannels, ksize, stride, pad,
+		     pool_get_pixel_float, MAX_POOL, false);
+}
+
+void avgpool(float *xout, float *x, int *height, int *width, int nchannels,
+	     int ksize, int stride, int pad)
+{
+	pool_generic(xout, x, height, width, nchannels, ksize, stride, pad,
+		     pool_get_pixel_float, AVG_POOL, false);
+	for (int i = 0; i < batch_size * nchannels * (*height) * (*width); i++)
+		xout[i] /= (ksize * ksize);
+}
+
+void relu(float *x, int size)
+{
+	// apply ReLU (Rectified Linear Unit) activation
+	for (int i = 0; i < batch_size * size; i++) {
+		x[i] = x[i] > 0.0f ? x[i] : 0.0f;
+	}
+}
 
 void linear(float *xout, float *x, float *p, LinearConfig lc)
 {
@@ -48,10 +79,4 @@ void conv(float *xout, float *x, float *p, ConvConfig cc, int height, int width)
 			}
 		}
 	}
-}
-
-void matadd(float *x, float *y, int size)
-{
-	float alpha = 1.0f;
-	bli_saxpyv(BLIS_NO_CONJUGATE, batch_size * size, &alpha, y, 1, x, 1);
 }

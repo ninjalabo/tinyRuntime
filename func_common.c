@@ -4,7 +4,9 @@
 #include <math.h>
 #include <stdbool.h>
 
-#include "properties.h"
+#include "config_common.h"
+#include "config_vanilla.h"
+#include "func_common.h"
 
 // avoid division by zero
 #define eps 0.00001f
@@ -32,8 +34,10 @@ void read_imagenette_image(char **paths, float *images, int bs)
 	}
 }
 
-static float im2col_get_pixel(float *im, int height, int width, int row,
-			      int col, int channel, int pad, int start_idx)
+// FIX: im2col function may be possible to be optimized
+static float im2col_get_pixel_float(float *im, int height, int width, int row,
+				    int col, int channel, int pad,
+				    int start_idx)
 {
 	row -= pad;
 	col -= pad;
@@ -42,10 +46,22 @@ static float im2col_get_pixel(float *im, int height, int width, int row,
 	return im[start_idx + col + width * (row + height * channel)];
 }
 
-static void im2col_populate_column(float *col, float *im, int height, int width,
-				   int out_height, int out_width, int ksize,
-				   int stride, int pad, int c, int col_size,
-				   int col_idx, int im_idx)
+static uint8_t im2col_get_pixel_uqtensor(UQuantizedTensor *im, int height,
+					int width, int row, int col,
+					int channel, int pad, int start_idx)
+{
+	row -= pad;
+	col -= pad;
+	if (row < 0 || col < 0 || row >= height || col >= width)
+		return im->zero_point;
+	return im->q[start_idx + col + width * (row + height * channel)];
+}
+
+static void im2col_populate_column_float(float *col, float *im, int height,
+					 int width, int out_height,
+					 int out_width, int ksize, int stride,
+					 int pad, int c, int col_size,
+					 int col_idx, int im_idx)
 {
 	int w_offset = c % ksize;
 	int h_offset = (c / ksize) % ksize;
@@ -56,63 +72,19 @@ static void im2col_populate_column(float *col, float *im, int height, int width,
 			int in_col = w_offset + w * stride;
 			int idx = (h * out_width + w) * col_size + c;
 			col[col_idx + idx] =
-			    im2col_get_pixel(im, height, width, in_row, in_col,
+			    im2col_get_pixel_float(im, height, width, in_row, in_col,
 					     chan, pad, im_idx);
 		}
 	}
 }
 
-static void im2col_generic(float *col, float *im, int *height, int *width,
-			   int nchannels, int ksize, int stride, int pad)
-{
-	// im (nchannels, height, width) -> col (out_height * out_width, col_size)
-	int out_height = (*height + 2 * pad - ksize) / stride + 1;
-	int out_width = (*width + 2 * pad - ksize) / stride + 1;
-
-	int col_size = nchannels * ksize * ksize;
-	for (int bs = 0; bs < batch_size; bs++) {
-		int col_idx = bs * col_size * out_height * out_width;
-		int im_idx = bs * nchannels * (*height) * (*width);
-		for (int c = 0; c < col_size; c++) {
-			im2col_populate_column(col, im, *height, *width,
-					       out_height, out_width, ksize,
-					       stride, pad, c, col_size,
-					       col_idx, im_idx);
-		}
-	}
-	// update current height and width
-	*height = out_height;
-	*width = out_width;
-}
-
-void im2col(float *col, float *im, ConvConfig cc, int *height, int *width)
-{
-	im2col_generic(col, im, height, width, cc.ic, cc.ksize, cc.stride,
-		       cc.pad);
-}
-
-void im2col_q(float *col, float *im, ConvConfigQ cc, int *height, int *width)
-{
-	im2col_generic(col, im, height, width, cc.ic, cc.ksize, cc.stride,
-		       cc.pad);
-}
-
-// FIX: Unify im2col functions
-static float im2col_get_pixel_sq(UQuantizedTensorSQ *im, int height, int width,
-				 int row, int col, int channel, int pad, int start_idx)
-{
-	row -= pad;
-	col -= pad;
-	if (row < 0 || col < 0 || row >= height || col >= width)
-		return im->zero_point;
-	return im->q[start_idx + col + width * (row + height * channel)];
-}
-
-static void im2col_populate_column_sq(UQuantizedTensorSQ *col,
-				      UQuantizedTensorSQ *im, int height,
-				      int width, int out_height, int out_width,
-				      int ksize, int stride, int pad, int c,
-				      int col_size, int col_idx, int im_idx)
+static void im2col_populate_column_uqtensor(UQuantizedTensor *col,
+					    UQuantizedTensor *im, int height,
+					    int width, int out_height,
+					    int out_width, int ksize,
+					    int stride, int pad, int c,
+					    int col_size, int col_idx,
+					    int im_idx)
 {
 	int w_offset = c % ksize;
 	int h_offset = (c / ksize) % ksize;
@@ -123,43 +95,42 @@ static void im2col_populate_column_sq(UQuantizedTensorSQ *col,
 			int in_col = w_offset + w * stride;
 			int idx = (h * out_width + w) * col_size + c;
 			col->q[col_idx + idx] =
-			    im2col_get_pixel_sq(im, height, width, in_row,
+			    im2col_get_pixel_uqtensor(im, height, width, in_row,
 						in_col, chan, pad, im_idx);
 		}
 	}
 }
 
-static void im2col_generic_sq(UQuantizedTensorSQ *col, UQuantizedTensorSQ *im,
-			      int *height, int *width, int nchannels,
-			      int ksize, int stride, int pad)
+void im2col_generic(void *col, void *im, int *height, int *width,
+		    int nchannels, int ksize, int stride, int pad,
+		    int type)
 {
 	// im (nchannels, height, width) -> col (out_height * out_width, col_size)
 	int out_height = (*height + 2 * pad - ksize) / stride + 1;
 	int out_width = (*width + 2 * pad - ksize) / stride + 1;
+
+	im2col_populate_column_fn fn;
+	if (type == FLOAT) {
+		fn = (im2col_populate_column_fn)im2col_populate_column_float;
+	} else if (type == UQTENSOR) {
+		fn = (im2col_populate_column_fn)im2col_populate_column_uqtensor;
+	} else {
+		fprintf(stderr, "Invalid im2col type\n");
+		exit(EXIT_FAILURE);
+	}
 
 	int col_size = nchannels * ksize * ksize;
 	for (int bs = 0; bs < batch_size; bs++) {
 		int col_idx = bs * col_size * out_height * out_width;
 		int im_idx = bs * nchannels * (*height) * (*width);
 		for (int c = 0; c < col_size; c++) {
-			im2col_populate_column_sq(col, im, *height, *width,
-					       out_height, out_width, ksize,
-					       stride, pad, c, col_size,
-					       col_idx, im_idx);
+			fn(col, im, *height, *width, out_height, out_width,
+			   ksize, stride, pad, c, col_size, col_idx, im_idx);
 		}
 	}
 	// update current height and width
 	*height = out_height;
 	*width = out_width;
-}
-
-void im2col_sq(UQuantizedTensorSQ *col, UQuantizedTensorSQ *im,
-	       ConvConfigSQ cc, int *height, int *width)
-{
-	im2col_generic_sq(col, im, height, width, cc.ic, cc.ksize, cc.stride,
-		       cc.pad);
-	col->scale = im->scale;
-	col->zero_point = im->zero_point;
 }
 
 void batchnorm_one_group(float *xout, float *x, float *w, float *b,
@@ -192,43 +163,76 @@ void batchnorm(float *xout, float *x, float *p, BnConfig bc, int size)
 	}
 }
 
-typedef float (*PoolOperation)(float, float);
-
-static inline float pool_get_max(float inp, float val)
+static inline float pool_get_max(float x, float y)
 {
-	return fmax(inp, val);
+	return fmax(x, y);
 }
 
-static inline float pool_add(float inp, float val)
+static inline float pool_add(float x, float y)
 {
-	return val + inp;
+	return x + y;
 }
 
-static float pool_get_pixel(float *x, int height, int width, int ksize,
-			    int in_start_row, int in_start_col,
-			    PoolOperation op, int group)
+void pool_get_pixel_float(void *xout, int xout_idx, void *x, int height,
+			  int width, int ksize, int in_start_row,
+			  int in_start_col, pool_operation op, int group)
 {
+	float *xout_ptr = (float *) xout;
+	float *x_ptr = (float *) x;
 	float val = 0.0f;
 	for (int k = 0; k < ksize * ksize; k++) {
 		int in_row = in_start_row + k / ksize;
 		int in_col = in_start_col + k % ksize;
 		if (in_row >= 0 && in_row < height && in_col >= 0
 		    && in_col < width) {
-			float inp =
-			    x[group * height * width + in_row * width + in_col];
-			val = op(inp, val);
+			int x_idx =
+			    group * height * width + in_row * width + in_col;
+			val = op(x_ptr[x_idx], val);
 		}
 	}
-	return val;
+	xout_ptr[xout_idx] = val;
 }
 
-static void pool_generic(float *xout, float *x, int *height, int *width,
-			 int nchannels, int ksize, int stride, int pad,
-			 PoolOperation op, bool concat)
+void pool_get_pixel_uint8(void *xout, int xout_idx, void *x, int height,
+			  int width, int ksize, int in_start_row,
+			  int in_start_col, pool_operation op, int group)
+{
+	// NOTE: This function performs type conversion to support multiple
+	// data types, but this conversion has minimal impact on performance.
+	uint8_t *xout_ptr = (uint8_t *) xout;
+	uint8_t *x_ptr = (uint8_t *) x;
+	float val = 0.0f;
+	for (int k = 0; k < ksize * ksize; k++) {
+		int in_row = in_start_row + k / ksize;
+		int in_col = in_start_col + k % ksize;
+		if (in_row >= 0 && in_row < height && in_col >= 0
+		    && in_col < width) {
+			int x_idx =
+			    group * height * width + in_row * width + in_col;
+			val = op(x_ptr[x_idx], val);
+		}
+	}
+	xout_ptr[xout_idx] = (uint8_t) val;
+}
+
+void pool_generic(void *xout, void *x, int *height, int *width, int nchannels,
+		  int ksize, int stride, int pad,
+		  pool_get_pixel_fn pool_get_pixel, int op_type,
+		  bool concat)
 {
 	int out_height = (*height + 2 * pad - ksize) / stride + 1;
 	int out_width = (*width + 2 * pad - ksize) / stride + 1;
 	int out_size = out_height * out_width;
+
+	pool_operation op;
+	if (op_type == MAX_POOL) {
+		op = pool_get_max;
+	} else if (op_type == AVG_POOL) {
+		op = pool_add;
+	} else {
+		fprintf(stderr, "Invalid pool operation\n");
+		exit(EXIT_FAILURE);
+	}
 
 	for (int k = 0; k < batch_size; k++) {
 		int xout_idx = k * nchannels * out_size;
@@ -241,32 +245,17 @@ static void pool_generic(float *xout, float *x, int *height, int *width,
 				int in_start_row = out_row * stride - pad;
 				int in_start_col = out_col * stride - pad;
 
-				float val =
-				pool_get_pixel(x, *height, *width, ksize,
-						in_start_row, in_start_col, op,
-						group);
-				xout[xout_idx + c * out_size + pixel] = val;
+				// current xout index
+				int c_xout_idx =
+				    xout_idx + c * out_size + pixel;
+				pool_get_pixel(xout, c_xout_idx, x, *height,
+					       *width, ksize, in_start_row,
+					       in_start_col, op, group);
 			}
 		}
 	}
 	*height = out_height;
 	*width = out_width;
-}
-
-void maxpool(float *xout, float *x, int *height, int *width, int nchannels,
-	     int ksize, int stride, int pad)
-{
-	pool_generic(xout, x, height, width, nchannels, ksize, stride, pad,
-		     pool_get_max, false);
-}
-
-void avgpool(float *xout, float *x, int *height, int *width, int nchannels,
-	     int ksize, int stride, int pad)
-{
-	pool_generic(xout, x, height, width, nchannels, ksize, stride, pad,
-		     pool_add, false);
-	for (int i = 0; i < batch_size * nchannels * (*height) * (*width); i++)
-		xout[i] /= (ksize * ksize);
 }
 
 void concat_pool(float *xout, float *x, int *height, int *width, int nchannels,
@@ -276,10 +265,10 @@ void concat_pool(float *xout, float *x, int *height, int *width, int nchannels,
 	int h_prev = *height;
 	int w_prev = *width;
 	pool_generic(xout, x, height, width, nchannels, ksize, stride, pad,
-		     pool_get_max, true);
+		     pool_get_pixel_float, MAX_POOL, true);
 	int half_out_size = nchannels * (*height) * (*width);
 	pool_generic(&xout[half_out_size], x, &h_prev, &w_prev, nchannels,
-		     ksize, stride, pad, pool_add, true);
+		     ksize, stride, pad, pool_get_pixel_float, AVG_POOL, true);
 	for (int k = 0; k < batch_size; k++) {
 		int xout_idx = k * 2 * half_out_size + half_out_size;
 		for (int i = 0; i < half_out_size; i++) {
@@ -288,72 +277,10 @@ void concat_pool(float *xout, float *x, int *height, int *width, int nchannels,
 	}
 }
 
-// FIX : Unify pool functions
-static uint8_t pool_get_pixel_q(UQuantizedTensorSQ *x, int height, int width,
-				int ksize, int in_start_row, int in_start_col,
-				int group)
+void matadd(float *x, float *y, int size)
 {
-	uint8_t val = 0;
-	for (int k = 0; k < ksize * ksize; k++) {
-		int in_row = in_start_row + k / ksize;
-		int in_col = in_start_col + k % ksize;
-		if (in_row >= 0 && in_row < height && in_col >= 0
-		    && in_col < width) {
-			float inp =
-			    x->q[group * height * width + in_row * width + in_col];
-			val = val > inp ? val : inp;
-		}
-	}
-	return val;
-}
-
-static void pool_generic_q(UQuantizedTensorSQ *xout, UQuantizedTensorSQ *x,
-			   int *height, int *width, int nchannels, int ksize,
-			   int stride, int pad)
-{
-	int out_height = (*height + 2 * pad - ksize) / stride + 1;
-	int out_width = (*width + 2 * pad - ksize) / stride + 1;
-	int out_size = out_height * out_width;
-
-	for (int group = 0; group < batch_size * nchannels; group++) {
-		for (int pixel = 0; pixel < out_size; pixel++) {
-			int out_row = pixel / out_width;
-			int out_col = pixel % out_width;
-			int in_start_row = out_row * stride - pad;
-			int in_start_col = out_col * stride - pad;
-
-			uint8_t val =
-			    pool_get_pixel_q(x, *height, *width, ksize,
-					   in_start_row, in_start_col, group);
-			xout->q[group * out_size + pixel] = val;
-		}
-	}
-	*height = out_height;
-	*width = out_width;
-}
-
-void maxpool_q(UQuantizedTensorSQ *xout, UQuantizedTensorSQ *x, int *height,
-	       int *width, int nchannels, int ksize, int stride, int pad)
-{
-	pool_generic_q(xout, x, height, width, nchannels, ksize, stride, pad);
-	xout->scale = x->scale;
-	xout->zero_point = x->zero_point;
-}
-
-void relu(float *x, int size)
-{
-	// apply ReLU (Rectified Linear Unit) activation
 	for (int i = 0; i < batch_size * size; i++) {
-		x[i] = x[i] > 0.0f ? x[i] : 0.0f;
-	}
-}
-
-// FIX: Unify relu functions
-void relu_q(UQuantizedTensorSQ *x, int size)
-{
-	// apply ReLU (Rectified Linear Unit) activation
-	for (int i = 0; i < batch_size * size; i++) {
-		x->q[i] = x->q[i] > x->zero_point ? x->q[i] : x->zero_point;
+		x[i] = x[i] + y[i];
 	}
 }
 
@@ -401,8 +328,7 @@ void matcopy_float(float *xout, float *x, int size) {
 }
 
 // Unify matcopy functions
-void matcopy_quantized_tensor(UQuantizedTensorSQ *xout, UQuantizedTensorSQ *x,
-			      int size) {
+void matcopy_uqtensor(UQuantizedTensor *xout, UQuantizedTensor *x, int size) {
 	memcpy(xout->q, x->q, batch_size * size * sizeof(uint8_t));
 	xout->scale = x->scale;
 	xout->zero_point = x->zero_point;
