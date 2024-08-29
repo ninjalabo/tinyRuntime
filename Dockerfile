@@ -7,24 +7,29 @@
 
 
 # MODEL EXPORT COMPILER
-FROM python:3.9-slim as compiler
+# Common base stage for installing dependencies
+FROM python:3.9-slim as compiler-export-base
 WORKDIR /root
-COPY prep_model.py export.py train.py /root
-# TODO: In total over 1 GB, everything is not needed for sure (try `pip install --no-deps`)
 RUN pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 RUN pip install fastai fasterai
-CMD python prep_model.py
-# To build and push docker image, run: 
-# docker buildx build --target compiler --push --platform linux/arm64,linux/amd64 -t ninjalabo/compiler-export-models:latest .
 
-# COMPILING TINYRUNTIME INFERENCES STATICALLY
-# By following instructions below, you can compile tinyRuntime inferences statically, and store it in https://github.com/ninjalabo/inferences
-FROM ubuntu as test
-WORKDIR /root
-RUN apt-get update && apt-get install -y git make gcc python3
-RUN git clone https://github.com/flame/blis.git
-RUN cd blis && ./configure --enable-static generic && make -j && make install
-# To build docker image run
-# docker build -t test --target test
-# After building the docker image, run in tinyRuntime repo
-# docker run -v $(pwd):/root test make compile BLIS=1 ARCH=arm STATIC=1
+# Separate stage for vanilla model export
+FROM compiler-export-base as compiler-export-vanilla
+COPY export_model_vanilla.py export.py /root
+CMD python export_model_vanilla.py
+# To build and push the docker image, run:
+# docker build --target compiler-export-vanilla --push --platform linux/amd64 -t ninjalabo/compiler-export-vanilla:latest .
+
+# Separate stage for dq model export
+FROM compiler-export-base as compiler-export-dq
+COPY export_model_dq.py export.py /root
+CMD python export_model_dq.py
+# To build and push the docker image, run:
+# docker build --target compiler-export-dq --push --platform linux/amd64 -t ninjalabo/compiler-export-dq:latest .
+
+# Separate stage for sq model export
+FROM compiler-export-base as compiler-export-sq
+COPY export_model_sq.py export.py /root
+CMD python export_model_sq.py
+# To build and push the docker image, run:
+# docker build --target compiler-export-sq --push --platform linux/amd64 -t ninjalabo/compiler-export-sq:latest .

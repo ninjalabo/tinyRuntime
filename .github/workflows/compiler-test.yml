@@ -4,15 +4,7 @@ name: compiler-test
 on:
   push:
     paths:
-      - 'prep_model.py'
-      - 'export_model.py'
-      - 'Dockerfile'
-      - '.github/workflows/compiler-test.yml'
-  pull_request:
-    types: [opened, synchronize, reopened]
-    paths:
-      - 'prep_model.py'
-      - 'export_model.py'
+      - 'export*.py'
       - 'Dockerfile'
       - '.github/workflows/compiler-test.yml'
   workflow_dispatch:
@@ -32,27 +24,43 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update && sudo apt-get install -y git-lfs
+          git lfs install
+
       - name: Prepare environment
         run: |
           git clone https://huggingface.co/ninjalabo/resnet18 && cp resnet18/model.pkl test/model.pkl
-          sudo apt-get update && sudo apt-get install -y jq
+          git clone https://huggingface.co/datasets/ninjalabo/imagenette2-320 data
+          cd data && git lfs pull
 
-      - name: Build Docker image
-        run: docker build --target compiler -t ninjalabo/compiler-export-models .
+      - name: Build Docker images
+        run: |
+          docker build --target compiler-export-vanilla -t ninjalabo/compiler-export-vanilla .
+          docker build --target compiler-export-dq -t ninjalabo/compiler-export-dq .
+          docker build --target compiler-export-sq -t ninjalabo/compiler-export-sq .
 
       - name: Test model export
         run: |
-          docker run --rm -v $(pwd)/test:/root/md ninjalabo/compiler-export-models
+          docker run --rm -v $(pwd)/test:/root/md ninjalabo/compiler-export-vanilla
           if [ ! -f test/model.bin ]; then
             echo "Error: test/model.bin does not exist"
             exit 1
           fi
           SIZE=$(stat -c %s test/model.bin)
 
-          jq '.compression.quantization = true' test/runtime_info.json > temp.json && mv temp.json test/runtime_info.json
-          docker run --rm -v $(pwd)/test:/root/md ninjalabo/compiler-export-models
+          docker run --rm -v $(pwd)/test:/root/md ninjalabo/compiler-export-dq
+          QUANT_SIZE=$(stat -c %s test/model.bin)
+          rm test/model.bin
+          if [ $QUANT_SIZE -ge $SIZE ]; then
+            echo "Error: Quantized model (DQ) is not smaller than non-quantized model"
+            exit 1
+          fi
+
+          docker run --rm -v $(pwd)/test:/root/md -v $(pwd)/data:/root/data ninjalabo/compiler-export-sq
           QUANT_SIZE=$(stat -c %s test/model.bin)
           if [ $QUANT_SIZE -ge $SIZE ]; then
-            echo "Error: Quantized model is not smaller than non-quantized model"
+            echo "Error: Quantized model (SQ) is not smaller than non-quantized model"
             exit 1
           fi

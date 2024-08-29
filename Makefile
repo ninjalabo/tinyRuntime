@@ -5,9 +5,6 @@ CC = $(if $(XCODESELECT),clang,gcc)
 CXX = $(if $(XCODESELECT),clang++,g++)
 
 CFLAGS := -Os -Wall
-# compile statically if `STATIC` is set, remember configure BLIS and oneDNN as static library if you use it
-# TODO: static increase the size of binary, optimize and reduce binary size
-CFLAGS += $(if $(filter ON,$(STATIC)),-static,)
 
 SRC := func_common.c
 
@@ -17,7 +14,12 @@ LDFLAGS := $(if $(filter ON,$(BLAS)),-lblis,)
 LDFLAGS +=  $(if $(and $(filter clang,$(CC)),$(BLAS)),-I$(LIBBLIS_HOME)/include -L$(LIBBLIS_HOME)/lib,)
 SRC += $(if $(filter ON,$(BLAS)),func_blis.c,func.c)
 
-# add -lm and -fopenmp after -lblis so that symbols from the libraries are available to resolve references in BLIS
+# include oneDNN libraries if variable `BLAS` is ON
+ONEDNN_HOME := $(if $(filter clang,$(CC)),$(shell brew --prefix onednn),)
+LDFLAGS += $(if $(filter ON,$(BLAS)),-ldnnl,)
+LDFLAGS += $(if $(ONEDNN_HOME),-I$(ONEDNN_HOME)/include -L$(ONEDNN_HOME)/lib,)
+
+# add -lm and -fopenmp after -lblis and -lddnl so that symbols from the libraries are available to resolve references
 LDFLAGS += -lm
 
 # add OpenMP flags
@@ -25,10 +27,6 @@ LDFLAGS += $(if $(filter clang,$(CC)),-lomp -Xpreprocessor -fopenmp,-fopenmp)
 OPENMP_HOME := $(if $(filter clang,$(CC)),$(shell brew --prefix libomp),)
 LDFLAGS += $(if $(OPENMP_HOME),-I$(OPENMP_HOME)/include -L$(OPENMP_HOME)/lib,)
 
-# include oneDNN libraries if variable `BLAS` is ON
-ONEDNN_HOME := $(if $(filter clang,$(CC)),$(shell brew --prefix onednn),)
-LDFLAGS += $(if $(filter ON,$(BLAS)),-ldnnl,)
-LDFLAGS += $(if $(ONEDNN_HOME),-I$(ONEDNN_HOME)/include -L$(ONEDNN_HOME)/lib,)
 # include quantization functions
 QUANT_TYPE ?= SQ
 SRC += $(if $(filter DQON,$(QUANT_TYPE)$(BLAS)),func_dq_onednn.c, \
@@ -37,8 +35,13 @@ SRC += $(if $(filter DQON,$(QUANT_TYPE)$(BLAS)),func_dq_onednn.c, \
        $(if $(filter SQ,$(QUANT_TYPE)),func_sq.c,))))
 CFLAGS += $(if $(filter DQ,$(QUANT_TYPE)), -DUSE_DQ_FUNC,)
 
+# compile statically if `STATIC` is ON, remember configure BLIS and oneDNN as static library if you use it
+# TODO: static increase the size of binary, optimize and reduce binary size
+CFLAGS += $(if $(filter ON,$(STATIC)),-static,)
+LDFLAGS += $(if $(filter ON,$(STATIC)),-lstdc++,)
+
 # Fix func_q.c is not needed in run.c and func.c not needed in runq.c
-compile: 
+compile:
 	$(CC) $(CFLAGS) run.c $(SRC) -o run $(LDFLAGS)
 	$(CC) $(CFLAGS) runq.c $(SRC) -o runq $(LDFLAGS)
 

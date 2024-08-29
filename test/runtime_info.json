@@ -3,7 +3,10 @@
   "architecture": "amd64",
   "image": "",
   "compression": {
-    "quantization": false,
+    "quantization": {
+      "type": "dynamic",
+      "asymmetric": true
+    },
     "pruning": 0
   },
   "results": {

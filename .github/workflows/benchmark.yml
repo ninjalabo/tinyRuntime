@@ -2,8 +2,8 @@ name: benchmark
 # Run the workflow if C files are modified
 on:
   push:
-#     paths:
-#       - '**/*.c'
+    paths:
+      - '**/*.c'
   workflow_dispatch:
 
 permissions:
