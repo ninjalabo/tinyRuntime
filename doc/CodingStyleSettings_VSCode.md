@@ -1,2 +1,2 @@
 When editing C files in Visual Studio Code, we follow the [Linux Kernel Coding Style](https://www.kernel.org/doc/html/v4.10/process/coding-style.html).
-For consistency and readability, please settings saved in `.vscode/settings.json`. The settings have been saved in `.vscode/settings.json`. Simply open the directory by `code tinyRuntime` to automatically apply these settings.
+For consistency and readability, please use settings for C defined in `.vscode/settings.json`. To use these settings in VS Code, simply open the directory by `code tinyRuntime` to automatically apply these settings or copy content to your own `.vscode` folder.

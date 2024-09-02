@@ -182,8 +182,9 @@ def export_model_dq8(model, file_path="modelq8.bin", gs=64, asymmetric=True):
     bn_layers = [layer for layer in model.modules() if isinstance(layer, torch.nn.BatchNorm1d)]
     nbn = len(bn_layers)
     nactivation = 0 # dynamic quantization does not calculate scales and zero points for activations beforehand
-    nparameters = sum(p.numel() for layer in [*conv_layers, *linear_layers] for p in layer.parameters())
-    header = struct.pack("7i", nclasses, nconv, nlinear, nbn, nactivation, nparameters, int(asymmetric))
+    # calculate number of parameters to be quantized
+    nqparams = sum(p.numel() for layer in [*conv_layers, *linear_layers] for p in layer.parameters())
+    header = struct.pack("7i", nclasses, nconv, nlinear, nbn, nactivation, nqparams, int(asymmetric))
     f.write(header)
     # write layers' config
     qoffset = 0 # offset for quantized parameters
@@ -314,8 +315,7 @@ def find_input_activation_indices(module, layers, index=0, indices=None):
             index, indices = find_input_activation_indices(child, layers, index, indices)
     return index, indices
 
-# FIX: write unit test for export_model_sq8, currently quantization takes time, thus not implemented
-def export_model_sq8(model, model_prepared, file_path="modelq8.bin"):
+def export_model_sq8(qmodel, model_prepared, file_path="modelq8.bin"):
     '''
     Export the quantized model to a file
     The data inside the file follows this order:
@@ -331,15 +331,15 @@ def export_model_sq8(model, model_prepared, file_path="modelq8.bin"):
     # write model configs
     nclasses = 10
     # gather convolutional layers
-    conv_layers = [layer for layer in model.modules() if layer._get_name() in
+    conv_layers = [layer for layer in qmodel.modules() if layer._get_name() in
                    {'QuantizedConvReLU2d', 'QuantizedConv2d'}]
     nconv = len(conv_layers)
     # gather linear layers
-    linear_layers = [layer for layer in model.modules() if layer._get_name() in
+    linear_layers = [layer for layer in qmodel.modules() if layer._get_name() in
                     {'QuantizedLinear', 'QuantizedLinearReLU'}]
     nlinear = len(linear_layers)
     # gather batchnorm layers
-    bn_layers = [layer for layer in model.modules() if isinstance(layer, torch.nn.BatchNorm1d)]
+    bn_layers = [layer for layer in qmodel.modules() if isinstance(layer, torch.nn.BatchNorm1d)]
     nbn = len(bn_layers)
     # calculate number of activations
     nactivation = 0
@@ -348,13 +348,14 @@ def export_model_sq8(model, model_prepared, file_path="modelq8.bin"):
             nactivation += 1
         else:
             break
-    # calculate number of params (number of biases is multiplied by 4 because biases are int32)
-    nparams = 0
+    # calculate size that quantized parameters use in bytes
+    # bias size is multiplied by 4 because biases are quantized to int32
+    nqparams = 0
     for l in [*conv_layers, *linear_layers]:
         # l.bias() can be None even though l.bias is not None (See https://github.com/ninjalabo/tinyRuntime/actions/runs/10501848014/job/29092502386)
-        nparams += l.weight().numel() + (0 if l.bias is None or l.bias() is None else 4 * l.bias().numel())
+        nqparams += l.weight().numel() + (0 if l.bias is None or l.bias() is None else 4 * l.bias().numel())
     asymmetric = 1 # static quantization always use zero point in pytorch
-    header = struct.pack("7i", nclasses, nconv, nlinear, nbn, nactivation, nparams, asymmetric)
+    header = struct.pack("7i", nclasses, nconv, nlinear, nbn, nactivation, nqparams, asymmetric)
     f.write(header)
     # write layers' config
     qoffset = 0 # offset for quantized parameters
